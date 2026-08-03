@@ -11,26 +11,29 @@ ADMIN_PASSWORD = "dltjdwo"
 
 # 페이지 기본 설정
 st.set_page_config(
-    page_title="실시간 다자간 대화 누적 및 자동 문서화 시스템",
+    page_title="실시간 상담건별 다자간 대화 누적 및 자동 문서화 시스템",
     page_icon="📋",
     layout="wide"
 )
 
-# 서버 메모리에 모든 사용자가 공유할 대화 목록 저장소 생성
+# 서버 메모리에 모든 사용자가 공유할 상담건(룸/탭)별 대화 저장소 생성
 @st.cache_resource
 def get_shared_chat_store():
     """
-    모든 접속자(A, B, C...)가 공유하는 실시간 대화 저장소입니다.
-    서버 메모리에 보관되어 각 사용자가 등록한 내용이 함께 쌓입니다.
+    모든 접속자가 공유하는 실시간 상담건별 저장소입니다.
+    dict 구조: { "상담건 이름": [대화목록] }
     """
-    return []
+    return {
+        "등촌7단지 701동 104호": [],
+        "공통 주거복지 상담": []
+    }
 
 def clean_markdown_for_txt(text: str) -> str:
-    """마크다운 기호(#, *, ** 등)를 제거하여 일반 텍스트 파일용으로 변환해 줍니다."""
-    cleaned = re.sub(r'#+\s*', '', text)  # # 제목 기호 제거
-    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned)  # **볼드** 제거
-    cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)  # *이탈릭* 제거
-    cleaned = re.sub(r'`(.*?)`', r'\1', cleaned)  # `코드` 제거
+    """마크다운 기호를 제거하여 일반 텍스트 파일용으로 변환해 줍니다."""
+    cleaned = re.sub(r'#+\s*', '', text)
+    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned)
+    cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)
+    cleaned = re.sub(r'`(.*?)`', r'\1', cleaned)
     return cleaned
 
 def check_password():
@@ -50,176 +53,210 @@ def check_password():
     return True
 
 if check_password():
-    # 공유 저장소 가져오기
-    shared_chats = get_shared_chat_store()
+    shared_store = get_shared_chat_store()
 
+    # 사이드바 설정
     with st.sidebar:
         st.header("⚙️ 설정 및 관리")
         api_key = st.text_input("OpenAI API Key 입력", type="password", placeholder="sk-...")
         model = st.selectbox("사용할 ChatGPT 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
-        
-        st.markdown("---")
-        st.markdown("### 🔄 공유 데이터 관리")
-        col_side1, col_side2 = st.columns(2)
-        with col_side1:
-            if st.button("🔄 새로고침", help="다른 사람이 새로 등록한 글을 불러옵니다."):
-                st.rerun()
-        with col_side2:
-            if st.button("🗑️ 전체 비우기", type="secondary", help="누적된 대화 기록을 모두 삭제합니다."):
-                shared_chats.clear()
-                st.success("대화 기록이 초기화되었습니다.")
-                st.rerun()
 
         st.markdown("---")
-        st.markdown("### 💡 실시간 사용 가이드")
+        st.markdown("### 🏢 상담건(탭) 관리")
+        new_room_name = st.text_input("새 상담건 / 호명 입력", placeholder="예: 등촌7단지 701동 105호")
+        if st.button("➕ 상담건(탭) 추가하기", use_container_width=True):
+            room_clean = new_room_name.strip()
+            if room_clean:
+                if room_clean not in shared_store:
+                    shared_store[room_clean] = []
+                    st.success(f"'{room_clean}' 상담건이 추가되었습니다!")
+                    st.rerun()
+                else:
+                    st.warning("이미 존재하는 상담건 이름입니다.")
+            else:
+                st.warning("상담건 이름을 입력해 주세요.")
+
+        st.markdown("---")
+        if st.button("🔄 새로고침", help="다른 사람이 등록한 최신 글을 불러옵니다.", use_container_width=True):
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 💡 사용 가이드")
         st.markdown("""
-        1. **각자 대화 등록**: A, B, C가 자신의 이름과 대화 내용/녹취록을 등록합니다.
-        2. **실시간 공유**: 모든 사용자가 누적된 대화 목록을 확인할 수 있습니다.
-        3. **통합 요약**: 대화 축적이 완료되면 오른쪽 **[✨ 누적 대화 전체 요약]** 버튼을 누릅니다.
-        4. **다운로드**: 요약 보고서를 `.txt` 또는 `.md` 파일로 다운로드합니다.
+        1. **상담건 선택**: 상단 탭에서 해당하는 상담건(예: 701동 104호)을 선택합니다.
+        2. **대화 등록**: 팀원 및 상담자가 해당 탭에서 발언 내용을 등록합니다.
+        3. **독립 요약**: 각 탭별로 대화가 완벽히 분리되어 개별 보고서로 요약됩니다.
         """)
 
     # 메인 타이틀
-    st.title("👥 실시간 다자간 대화 누적 & 통합 문서화 시스템")
-    st.caption("A, B, C 각 컴퓨터에서 대화를 등록하면 한곳에 누적되며, AI가 전체 내용을 종합하여 보고서로 정리합니다.")
+    st.title("👥 실시간 상담건별 다자간 대화 누적 & 자동 문서화 시스템")
+    st.caption("상담건(세대/팀)별로 탭을 나누어 대화를 입력하고, 각 탭의 내용을 개별 보고서로 종합합니다.")
     st.markdown("---")
 
-    # 메인 레이아웃: 좌측(대화 입력 및 누적 목록), 우측(요약 문서 결과)
-    col1, col2 = st.columns([1, 1])
+    room_names = list(shared_store.keys())
 
-    with col1:
-        st.subheader("💬 1. 대화 내용 등록 (각자 입력)")
-        
-        with st.form("chat_entry_form", clear_on_submit=True):
-            speaker_name = st.text_input("발언자 이름/직급", placeholder="예: 김철수 팀장, 이영희 대리, 박OO 신청자 등")
-            chat_text = st.text_area("대화 / 발언 / 상담 내용", height=120, placeholder="녹취록 텍스트나 발언 내용을 입력하세요...")
-            submit_button = st.form_submit_button("➕ 대화 등록하기", use_container_width=True)
+    if not room_names:
+        st.info("현재 생성된 상담건이 없습니다. 사이드바에서 새 상담건을 추가해 주세요.")
+    else:
+        # 상단 탭 생성
+        tabs = st.tabs(room_names)
 
-            if submit_button:
-                if not speaker_name.strip():
-                    st.warning("발언자 이름을 입력해 주세요!")
-                elif not chat_text.strip():
-                    st.warning("대화 내용을 입력해 주세요!")
-                else:
-                    new_entry = {
-                        "id": str(uuid.uuid4()),
-                        "time": datetime.now().strftime("%H:%M:%S"),
-                        "speaker": speaker_name.strip(),
-                        "content": chat_text.strip()
-                    }
-                    shared_chats.append(new_entry)
-                    st.success(f"'{speaker_name}'님의 대화가 공용 저장소에 등록되었습니다!")
-                    st.rerun()
+        for i, room in enumerate(room_names):
+            with tabs[i]:
+                chat_list = shared_store[room]
 
-        st.markdown("---")
-        st.subheader(f"📜 2. 누적 대화 목록 (총 {len(shared_chats)}건)")
+                # 삭제 및 비우기 컨트롤
+                col_title, col_del = st.columns([3, 1])
+                with col_title:
+                    st.markdown(f"### 📍 [{room}] 상담 대화방")
+                with col_del:
+                    if len(room_names) > 1:
+                        if st.button(f"🗑️ '{room}' 탭 삭제", key=f"del_room_{i}"):
+                            del shared_store[room]
+                            st.rerun()
 
-        if not shared_chats:
-            st.info("아직 등록된 대화 내용이 없습니다. 위 양식에서 첫 대화를 등록해 보세요!")
-        else:
-            # 삭제 처리를 위한 항목 추적
-            to_delete = None
-            for idx, item in enumerate(shared_chats):
-                with st.expander(f"[{item['time']}] {item['speaker']}: {item['content'][:30]}...", expanded=True):
-                    st.write(f"**화자:** {item['speaker']}")
-                    st.write(f"**시간:** {item['time']}")
-                    st.write(f"**내용:**\n{item['content']}")
-                    if st.button("❌ 항목 삭제", key=f"del_{item['id']}"):
-                        to_delete = idx
+                col1, col2 = st.columns([1, 1])
 
-            if to_delete is not None:
-                shared_chats.pop(to_delete)
-                st.rerun()
+                with col1:
+                    st.subheader("💬 대화 내용 등록")
+                    form_key = f"form_{room}"
+                    with st.form(form_key, clear_on_submit=True):
+                        speaker_name = st.text_input("발언자 이름/직급", placeholder="예: 김철수 팀장, 박OO 신청자", key=f"spk_{room}")
+                        chat_text = st.text_area("대화 / 발언 / 상담 내용", height=120, placeholder="대화 내용을 입력하세요...", key=f"txt_{room}")
+                        submit_button = st.form_submit_button("➕ 대화 등록하기", use_container_width=True)
 
-    with col2:
-        st.subheader("📋 3. 통합 문서화 결과")
+                        if submit_button:
+                            if not speaker_name.strip():
+                                st.warning("발언자 이름을 입력해 주세요!")
+                            elif not chat_text.strip():
+                                st.warning("대화 내용을 입력해 주세요!")
+                            else:
+                                new_entry = {
+                                    "id": str(uuid.uuid4()),
+                                    "time": datetime.now().strftime("%H:%M:%S"),
+                                    "speaker": speaker_name.strip(),
+                                    "content": chat_text.strip()
+                                }
+                                chat_list.append(new_entry)
+                                st.success(f"'{speaker_name}'님의 대화가 등록되었습니다!")
+                                st.rerun()
 
-        # 저장된 전체 대화록을 하나의 텍스트로 합치기
-        formatted_full_transcript = ""
-        for item in shared_chats:
-            formatted_full_transcript += f"[{item['speaker']}] ({item['time']})\n{item['content']}\n\n"
+                    st.markdown("---")
+                    st.subheader(f"📜 누적 대화 목록 (총 {len(chat_list)}건)")
 
-        if st.button("✨ 누적 대화 전체 요약 및 문서화 실행", type="primary", use_container_width=True):
-            if not api_key:
-                st.warning("사이드바에 OpenAI API Key(`sk-...`)를 먼저 입력해 주세요!")
-            elif not shared_chats:
-                st.warning("요약할 누적 대화가 없습니다. 대화를 먼저 등록해 주세요!")
-            else:
-                try:
-                    with st.spinner("ChatGPT가 누적된 모든 대화 내용을 종합 분석하여 보고서를 작성 중입니다..."):
-                        client = OpenAI(api_key=api_key)
+                    col_c1, col_c2 = st.columns([2, 1])
+                    with col_c2:
+                        if st.button("🗑️ 대화 전체 비우기", key=f"clear_chats_{room}", help="현재 탭의 모든 대화를 삭제합니다."):
+                            chat_list.clear()
+                            st.rerun()
 
-                        prompt = f"""
-당신은 전문 문서 작성 및 회의록 요약 전문가입니다.
-여러 명의 작성자 및 참여자가 실시간으로 등록한 전체 대화 내용을 바탕으로 깔끔하게 정리된 '통합 상담 및 업무 처리 보고서'를 작성해 주세요.
+                    if not chat_list:
+                        st.info("아직 등록된 대화 내용이 없습니다. 위 양식에서 대화를 등록해 보세요!")
+                    else:
+                        to_delete = None
+                        for idx, item in enumerate(chat_list):
+                            with st.expander(f"[{item['time']}] {item['speaker']}: {item['content'][:25]}...", expanded=True):
+                                st.write(f"**화자:** {item['speaker']}")
+                                st.write(f"**시간:** {item['time']}")
+                                st.write(f"**내용:**\n{item['content']}")
+                                if st.button("❌ 항목 삭제", key=f"del_item_{room}_{item['id']}"):
+                                    to_delete = idx
 
-[누적 전체 대화 내용]
+                        if to_delete is not None:
+                            chat_list.pop(to_delete)
+                            st.rerun()
+
+                with col2:
+                    st.subheader("📋 통합 문서화 결과")
+
+                    # 전체 대화 텍스트 생성
+                    formatted_full_transcript = ""
+                    for item in chat_list:
+                        formatted_full_transcript += f"[{item['speaker']}] ({item['time']})\n{item['content']}\n\n"
+
+                    summary_key = f"summary_{room}"
+
+                    if st.button(f"✨ [{room}] 전체 요약 및 문서화 실행", type="primary", use_container_width=True, key=f"btn_sum_{room}"):
+                        if not api_key:
+                            st.warning("사이드바에 OpenAI API Key(`sk-...`)를 먼저 입력해 주세요!")
+                        elif not chat_list:
+                            st.warning("요약할 대화 내용이 없습니다. 대화를 먼저 등록해 주세요!")
+                        else:
+                            try:
+                                with st.spinner(f"ChatGPT가 '{room}'의 대화 내용을 종합 분석 중입니다..."):
+                                    client = OpenAI(api_key=api_key)
+
+                                    prompt = f"""
+당신은 주거복지 및 업무 회의 전문 요약 도우미입니다.
+아래 대화 내용은 [{room}] 건에 관련된 대화 기록입니다. 
+핵심 정보 위주로 정제하여 깔끔한 '상담 및 업무 처리 보고서'를 작성해 주세요.
+
+[상담건/대상]
+{room}
+
+[누적 대화 내용]
 {formatted_full_transcript}
 
 [작성 규칙]
-1. 불필요한 인사말, 사담, 중복 표현은 제외하고 핵심 정보 위주로 정제하세요.
-2. 아래 서식 구조에 맞추어 마크다운으로 깔끔하게 작성해 주세요:
-   # 📋 실시간 통합 상담 및 업무 보고서
+1. 불필요한 인사말 및 사담은 제외하고 작성하세요.
+2. 아래 서식에 맞춰 마크다운 형태로 깔끔하게 정리하세요:
+   # 📋 [{room}] 상담 및 업무 보고서
    ## 1. 개요 및 참여자
-   - 주요 참여자/화자 목록 및 핵심 주제 요약
-   ## 2. 주요 논의 현황 및 주요 사실관계
-   - 각 사안별 논의 내용 및 서류/자격 등 현황
+   - 주요 참여자 및 핵심 상담 주제
+   ## 2. 주요 논의 및 사실관계 현황
+   - 구체적 논의 내용, 자격/서류 검토 현황 등
    ## 3. 결정 및 합의 사항
-   - 회의/상담을 통해 확정된 사항
    ## 4. 향후 조치 과제 (Action Items)
-   - 담당자/대상자별 할 일 및 기한 명시 (예: [이대리] ~서류 접수 처리, [신청자] ~제출 등)
+   - 담당자/신청자별 할 일 및 기한
 """
 
-                        response = client.chat.completions.create(
-                            model=model,
-                            messages=[
-                                {"role": "system", "content": "유능하고 친절한 문서 요약 도우미입니다."},
-                                {"role": "user", "content": prompt}
-                            ],
-                            temperature=0.3
-                        )
+                                    response = client.chat.completions.create(
+                                        model=model,
+                                        messages=[
+                                            {"role": "system", "content": "유능하고 친절한 문서 요약 도우미입니다."},
+                                            {"role": "user", "content": prompt}
+                                        ],
+                                        temperature=0.3
+                                    )
 
-                        result_text = response.choices[0].message.content
-                        st.session_state["last_summary"] = result_text
+                                    result_text = response.choices[0].message.content
+                                    st.session_state[summary_key] = result_text
 
-                except Exception as e:
-                    st.error(f"오류가 발생했습니다: {e}")
+                            except Exception as e:
+                                st.error(f"오류가 발생했습니다: {e}")
 
-        # 요약 결과 출력 및 다양한 파일 형식 다운로드 제공
-        if "last_summary" in st.session_state and st.session_state["last_summary"]:
-            st.markdown("---")
-            summary_content = st.session_state["last_summary"]
-            st.markdown(summary_content)
-            
-            st.markdown("---")
-            st.markdown("### 📥 요약 보고서 저장하기")
-            
-            col_dl1, col_dl2 = st.columns(2)
-            
-            # 1. 일반 텍스트 파일 (.txt) 저장
-            txt_content = clean_markdown_for_txt(summary_content)
-            with col_dl1:
-                st.download_button(
-                    label="📄 텍스트 파일 (.txt) 다운로드",
-                    data=txt_content,
-                    file_name=f"통합_상담보고서_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-                
-            # 2. 마크다운 파일 (.md) 저장
-            with col_dl2:
-                st.download_button(
-                    label="📝 마크다운 파일 (.md) 다운로드",
-                    data=summary_content,
-                    file_name=f"통합_상담보고서_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                    mime="text/markdown",
-                    use_container_width=True
-                )
+                    # 요약 결과 출력 및 다운로드
+                    if summary_key in st.session_state and st.session_state[summary_key]:
+                        st.markdown("---")
+                        summary_content = st.session_state[summary_key]
+                        st.markdown(summary_content)
 
-            # PDF 출력 안내 팁
-            st.info("""
-            💡 **PDF로 저장하는 팁:**
-            * 웹 브라우저에서 `Ctrl + P` (Mac은 `Cmd + P`)를 누른 후 **[PDF로 저장]**을 선택하시면 현재 깔끔하게 정리된 보고서 화면을 그대로 PDF 문서로 즉시 저장하실 수 있습니다.
-            * 또는 다운로드한 `.txt` 내용을 한글(HWP)이나 워드(Word)에 복사하여 PDF로 내보내셔도 됩니다.
-            """)
+                        st.markdown("---")
+                        st.markdown("### 📥 요약 보고서 저장하기")
+
+                        col_dl1, col_dl2 = st.columns(2)
+
+                        txt_content = clean_markdown_for_txt(summary_content)
+                        with col_dl1:
+                            st.download_button(
+                                label="📄 텍스트 파일 (.txt) 다운로드",
+                                data=txt_content,
+                                file_name=f"{room}_보고서_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                mime="text/plain",
+                                use_container_width=True,
+                                key=f"dl_txt_{room}"
+                            )
+
+                        with col_dl2:
+                            st.download_button(
+                                label="📝 마크다운 파일 (.md) 다운로드",
+                                data=summary_content,
+                                file_name=f"{room}_보고서_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                                mime="text/markdown",
+                                use_container_width=True,
+                                key=f"dl_md_{room}"
+                            )
+
+                        st.info("""
+                        💡 **PDF 저장 팁:** 브라우저에서 `Ctrl + P` (Mac은 `Cmd + P`)를 누른 후 **[PDF로 저장]**을 선택하시면 이 보고서 화면을 그대로 PDF 파일로 저장하실 수 있습니다.
+                        """)
