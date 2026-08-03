@@ -2,6 +2,12 @@ import streamlit as st
 from openai import OpenAI
 from datetime import datetime
 import uuid
+import re
+
+# ---------------------------------------------------------
+# [보안 설정] 원하는 접속 비밀번호를 여기서 수정하세요!
+# ---------------------------------------------------------
+ADMIN_PASSWORD = "dltjdwo"
 
 # 페이지 기본 설정
 st.set_page_config(
@@ -19,15 +25,23 @@ def get_shared_chat_store():
     """
     return []
 
+def clean_markdown_for_txt(text: str) -> str:
+    """마크다운 기호(#, *, ** 등)를 제거하여 일반 텍스트 파일용으로 변환해 줍니다."""
+    cleaned = re.sub(r'#+\s*', '', text)  # # 제목 기호 제거
+    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned)  # **볼드** 제거
+    cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)  # *이탈릭* 제거
+    cleaned = re.sub(r'`(.*?)`', r'\1', cleaned)  # `코드` 제거
+    return cleaned
+
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
 
     if not st.session_state["password_correct"]:
         st.title("🔒 로그인")
-        pwd = st.text_input("접속 비밀번호를 입력하세요 (기본: social1234)", type="password")
+        pwd = st.text_input("접속 비밀번호를 입력하세요", type="password")
         if st.button("로그인"):
-            if pwd == "social1234":
+            if pwd == ADMIN_PASSWORD:
                 st.session_state["password_correct"] = True
                 st.rerun()
             else:
@@ -61,7 +75,8 @@ if check_password():
         st.markdown("""
         1. **각자 대화 등록**: A, B, C가 자신의 이름과 대화 내용/녹취록을 등록합니다.
         2. **실시간 공유**: 모든 사용자가 누적된 대화 목록을 확인할 수 있습니다.
-        3. **통합 요약**: 대화 축적이 완료되면 아래 **[✨ 누적 대화 전체 요약]** 버튼을 누릅니다.
+        3. **통합 요약**: 대화 축적이 완료되면 오른쪽 **[✨ 누적 대화 전체 요약]** 버튼을 누릅니다.
+        4. **다운로드**: 요약 보고서를 `.txt` 또는 `.md` 파일로 다운로드합니다.
         """)
 
     # 메인 타이틀
@@ -170,14 +185,41 @@ if check_password():
                 except Exception as e:
                     st.error(f"오류가 발생했습니다: {e}")
 
-        # 요약 결과 출력 및 다운로드 기능 제공
+        # 요약 결과 출력 및 다양한 파일 형식 다운로드 제공
         if "last_summary" in st.session_state and st.session_state["last_summary"]:
             st.markdown("---")
-            st.markdown(st.session_state["last_summary"])
+            summary_content = st.session_state["last_summary"]
+            st.markdown(summary_content)
             
-            st.download_button(
-                label="📥 요약 보고서 다운로드 (.md)",
-                data=st.session_state["last_summary"],
-                file_name=f"통합_상담보고서_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                mime="text/markdown"
-            )
+            st.markdown("---")
+            st.markdown("### 📥 요약 보고서 저장하기")
+            
+            col_dl1, col_dl2 = st.columns(2)
+            
+            # 1. 일반 텍스트 파일 (.txt) 저장
+            txt_content = clean_markdown_for_txt(summary_content)
+            with col_dl1:
+                st.download_button(
+                    label="📄 텍스트 파일 (.txt) 다운로드",
+                    data=txt_content,
+                    file_name=f"통합_상담보고서_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+                
+            # 2. 마크다운 파일 (.md) 저장
+            with col_dl2:
+                st.download_button(
+                    label="📝 마크다운 파일 (.md) 다운로드",
+                    data=summary_content,
+                    file_name=f"통합_상담보고서_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+
+            # PDF 출력 안내 팁
+            st.info("""
+            💡 **PDF로 저장하는 팁:**
+            * 웹 브라우저에서 `Ctrl + P` (Mac은 `Cmd + P`)를 누른 후 **[PDF로 저장]**을 선택하시면 현재 깔끔하게 정리된 보고서 화면을 그대로 PDF 문서로 즉시 저장하실 수 있습니다.
+            * 또는 다운로드한 `.txt` 내용을 한글(HWP)이나 워드(Word)에 복사하여 PDF로 내보내셔도 됩니다.
+            """)
