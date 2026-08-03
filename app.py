@@ -5,10 +5,10 @@ import uuid
 import re
 import json
 
-ADMIN_PASSWORD = "social1234"
+ADMIN_PASSWORD = "dltjdwoghdwjdantlswhdgur"
 
 st.set_page_config(
-    page_title="500+ 단지 통합 대화 누적 및 문서화 시스템",
+    page_title="주택관리공단 주거복지 경진대회",
     page_icon="🏢",
     layout="wide"
 )
