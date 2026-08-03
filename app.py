@@ -33,7 +33,7 @@ def check_password():
         st.session_state["password_correct"] = False
 
     if not st.session_state["password_correct"]:
-        st.title("🔒 500+ 단지 상담 통합 관리 시스템 로그인")
+        st.title("🔒주거복지경진대회")
         pwd = st.text_input("접속 비밀번호를 입력하세요", type="password")
         if st.button("로그인", use_container_width=True):
             if pwd == ADMIN_PASSWORD:
@@ -73,7 +73,7 @@ if check_password():
         model = st.selectbox("ChatGPT 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
         
         st.markdown("---")
-        st.markdown("### 💾 백업 & 복원 (500+ 단지 데이터 보호)")
+        st.markdown("### 💾 백업 & 복원 (단지 데이터 보호)")
         
         # JSON 백업 내보내기
         json_data = json.dumps(shared_cases, ensure_ascii=False, indent=2)
@@ -111,7 +111,7 @@ if check_password():
                 st.success("전체 목록이 초기화되었습니다.")
                 st.rerun()
 
-    st.title("🏢 500+ 단지 다자간 상담 대화 통합 관리 시스템")
+    st.title("🏢 주택관리공단 주거복지경진대회")
     st.caption("500개 이상의 아파트 단지 및 호수별 상담건을 빠른 검색으로 찾아내고 대화를 실시간 누적하여 AI 문서로 생성합니다.")
     
     # 상단 요약 현황판
