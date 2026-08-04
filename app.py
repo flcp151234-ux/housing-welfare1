@@ -5,7 +5,7 @@ import uuid
 import re
 import json
 
-ADMIN_PASSWORD = "social1234"
+ADMIN_PASSWORD = "emdchs7ekswl"
 
 st.set_page_config(
     page_title="주거복지 경진대회",
