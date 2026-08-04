@@ -7,8 +7,6 @@ from datetime import datetime
 import plotly.graph_objects as go
 from openai import OpenAI
 
-ADMIN_PASSWORD = "315370"
-
 st.set_page_config(
     page_title="단지 주거복지 위험도 & 대화 통합 관리 시스템",
     page_icon="🏢",
@@ -87,6 +85,28 @@ if "shared_cases" not in st.session_state:
 
 shared_cases = st.session_state.shared_cases
 
+# 🔒 비밀번호 로그인 인증 로직
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "1234")  # Secrets에 설정이 없으면 기본 비밀번호 "1234" 사용
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def check_password():
+    if st.session_state.get("password_input") == APP_PASSWORD:
+        st.session_state.authenticated = True
+        st.session_state.password_input = ""
+    else:
+        st.session_state.authenticated = False
+        st.error("❌ 비밀번호가 올바르지 않습니다. 다시 확인 후 입력해 주세요.")
+
+if not st.session_state.authenticated:
+    st.title("🔒 단지 통합 주거복지 관리 시스템 로그인")
+    st.caption("본 시스템은 관계자 전용 보안 시스템입니다. 관리자 비밀번호를 입력해 주세요.")
+    st.text_input("🔑 로그인 비밀번호", type="password", key="password_input", on_change=check_password)
+    st.button("🔓 시스템 로그인", type="primary", use_container_width=True, on_click=check_password)
+    st.info("💡 기본 설정 비밀번호는 `1234` 입니다. (Streamlit Secrets에 `APP_PASSWORD = \"원하는비밀번호\"` 를 지정하면 자유롭게 변경됩니다.)")
+    st.stop()
+
 # 최초 접속 시 데이터가 없는 경우 샘플 데이터 1건 생성
 if not shared_cases:
     sample_id = "sample-101"
@@ -124,6 +144,12 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/city-buildings.png", width=70)
     st.title("🏢 관리자 설정")
     st.caption("주택관리공단 통합 주거복지 대화 시스템")
+    
+    if st.button("🔒 로그아웃", use_container_width=True):
+        st.session_state.authenticated = False
+        st.rerun()
+
+    st.markdown("---")
     
     # OpenAI API Key 자동 확인 (Secrets 우선 적용)
     api_key = st.secrets.get("OPENAI_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
