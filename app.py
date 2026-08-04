@@ -6,7 +6,7 @@ import re
 import json
 import plotly.graph_objects as go
 
-ADMIN_PASSWORD = "social1234"
+ADMIN_PASSWORD = "315370"
 
 st.set_page_config(
     page_title="단지 통합 대화 누적 및 문서화 시스템",
