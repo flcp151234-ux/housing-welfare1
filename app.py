@@ -7,6 +7,8 @@ from datetime import datetime
 import plotly.graph_objects as go
 from openai import OpenAI
 
+ADMIN_PASSWORD = "315370"
+
 st.set_page_config(
     page_title="단지 주거복지 위험도 & 대화 통합 관리 시스템",
     page_icon="🏢",
