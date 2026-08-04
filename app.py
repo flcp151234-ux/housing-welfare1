@@ -5,10 +5,10 @@ import uuid
 import re
 import json
 
-ADMIN_PASSWORD = "emdchs7ekswl"
+ADMIN_PASSWORD = "315370"
 
 st.set_page_config(
-    page_title="주거복지 경진대회",
+    page_title="단지 통합 대화 누적 및 문서화 시스템",
     page_icon="🏢",
     layout="wide"
 )
@@ -69,7 +69,26 @@ if check_password():
 
     with st.sidebar:
         st.header("⚙️ 시스템 설정 및 관리")
-        api_key = st.text_input("OpenAI API Key (sk-...)", type="password")
+        
+        # 1. Streamlit Secrets(서버 비밀 저장소)에 키가 등록되어 있는지 확인
+        default_api_key = ""
+        try:
+            if "OPENAI_API_KEY" in st.secrets:
+                default_api_key = st.secrets["OPENAI_API_KEY"]
+        except Exception:
+            pass
+
+        if default_api_key:
+            st.success("🔒 관리자 서버 API Key 자동 연동됨")
+            st.caption("일반 사용자는 별도 API Key 입력 없이 요약 기능을 이용할 수 있습니다.")
+            api_key = default_api_key
+        else:
+            api_key = st.text_input(
+                "OpenAI API Key (sk-...)", 
+                type="password", 
+                help="Streamlit Cloud 설정(Secrets)에 API Key를 등록하면 이 입력창은 자동으로 숨겨집니다."
+            )
+        
         model = st.selectbox("ChatGPT 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
         
         st.markdown("---")
@@ -104,7 +123,7 @@ if check_password():
         if st.button("🔄 즉시 새로고침", use_container_width=True):
             st.rerun()
 
-    st.title("🏢 상담 대화 통합 관리 시스템")
+    st.title("🏢 단지 상담 대화 통합 관리 시스템")
     st.caption("500개 이상의 아파트 단지 및 호수별 상담건을 빠른 검색으로 찾아내고 대화를 실시간 누적하여 AI 문서로 생성합니다.")
     
     # 상단 요약 현황판
