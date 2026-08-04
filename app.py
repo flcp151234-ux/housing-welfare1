@@ -5,7 +5,7 @@ import uuid
 import re
 import json
 
-ADMIN_PASSWORD = "emdchs7ekswl"
+ADMIN_PASSWORD = "social1234"
 
 st.set_page_config(
     page_title="주거복지 경진대회",
@@ -33,7 +33,7 @@ def check_password():
         st.session_state["password_correct"] = False
 
     if not st.session_state["password_correct"]:
-        st.title("🔒 주거복지 경진대회 시스템 로그인")
+        st.title("🔒 단지 상담 통합 관리 시스템 로그인")
         pwd = st.text_input("접속 비밀번호를 입력하세요", type="password")
         if st.button("로그인", use_container_width=True):
             if pwd == ADMIN_PASSWORD:
@@ -73,7 +73,7 @@ if check_password():
         model = st.selectbox("ChatGPT 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
         
         st.markdown("---")
-        st.markdown("### 💾 백업 & 복원 (데이터 보호)")
+        st.markdown("### 💾 백업 & 복원 (단지 데이터 보호)")
         
         # JSON 백업 내보내기
         json_data = json.dumps(shared_cases, ensure_ascii=False, indent=2)
@@ -83,7 +83,7 @@ if check_password():
             file_name=f"housing_cases_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             mime="application/json",
             use_container_width=True,
-            help="서버 재부팅 시를 대비해 전체 데이터를 컴퓨터에 백업합니다."
+            help="서버 재부팅 시를 대비해 전체 단지 데이터를 컴퓨터에 백업합니다."
         )
 
         # JSON 백업 복원하기
@@ -104,7 +104,7 @@ if check_password():
         if st.button("🔄 즉시 새로고침", use_container_width=True):
             st.rerun()
 
-    st.title("🏢 주거복지 경진대회 관리 시스템")
+    st.title("🏢 상담 대화 통합 관리 시스템")
     st.caption("500개 이상의 아파트 단지 및 호수별 상담건을 빠른 검색으로 찾아내고 대화를 실시간 누적하여 AI 문서로 생성합니다.")
     
     # 상단 요약 현황판
@@ -208,27 +208,52 @@ if check_password():
                             st.rerun()
 
             with col_in2:
-                # 3초 주기로 이 영역만 자동 새로고침되어 실시간으로 대화가 나타납니다 (카톡 방식)
-                @st.fragment(run_every="3s")
-                def render_live_chat_list(case_data):
-                    st.subheader(f"📜 누적 대화 목록 ({len(case_data['chats'])}건) 🔴 Live")
-                    if not case_data["chats"]:
+                # 실시간 동기화 토글 스위치 (서버 과부하 방지)
+                col_title, col_toggle = st.columns([2, 1])
+                with col_title:
+                    st.subheader(f"📜 누적 대화 목록 ({len(current_case['chats'])}건)")
+                with col_toggle:
+                    auto_refresh = st.toggle("🔴 실시간 자동 동기화", value=False, help="켜두면 5초마다 다른 사용자의 대화가 자동으로 갱신됩니다. (서버 자원 절약)")
+
+                if auto_refresh:
+                    # 5초 주기로 이 영역만 자동 새로고침 (ON 상태일 때만 작동)
+                    @st.fragment(run_every="5s")
+                    def render_live_chat_list(case_data):
+                        st.caption("⚡ 5초 주기 실시간 자동 동기화 중...")
+                        if not case_data["chats"]:
+                            st.info("아직 누적된 대화가 없습니다. 왼쪽 양식에서 대화를 등록하세요!")
+                        else:
+                            del_idx = None
+                            for idx, chat in enumerate(case_data["chats"]):
+                                with st.expander(f"[{chat['time']}] {chat['speaker']}: {chat['content'][:25]}...", expanded=True):
+                                    st.write(f"**화자:** {chat['speaker']}")
+                                    st.write(f"**시간:** {chat['time']}")
+                                    st.write(f"**내용:**\n{chat['content']}")
+                                    if st.button("❌ 삭제", key=f"del_{case_data['id']}_{chat['id']}"):
+                                        del_idx = idx
+
+                            if del_idx is not None:
+                                case_data["chats"].pop(del_idx)
+                                st.rerun()
+
+                    render_live_chat_list(current_case)
+                else:
+                    # OFF 상태일 때는 수동 갱신 (서버 자원 최적화)
+                    if not current_case["chats"]:
                         st.info("아직 누적된 대화가 없습니다. 왼쪽 양식에서 대화를 등록하세요!")
                     else:
                         del_idx = None
-                        for idx, chat in enumerate(case_data["chats"]):
+                        for idx, chat in enumerate(current_case["chats"]):
                             with st.expander(f"[{chat['time']}] {chat['speaker']}: {chat['content'][:25]}...", expanded=True):
                                 st.write(f"**화자:** {chat['speaker']}")
                                 st.write(f"**시간:** {chat['time']}")
                                 st.write(f"**내용:**\n{chat['content']}")
-                                if st.button("❌ 삭제", key=f"del_{case_data['id']}_{chat['id']}"):
+                                if st.button("❌ 삭제", key=f"del_manual_{current_case['id']}_{chat['id']}"):
                                     del_idx = idx
 
                         if del_idx is not None:
-                            case_data["chats"].pop(del_idx)
+                            current_case["chats"].pop(del_idx)
                             st.rerun()
-
-                render_live_chat_list(current_case)
 
         with tab_summary:
             st.subheader(f"📋 [{current_case['complex']} {current_case['unit']}] AI 요약 및 문서화")
