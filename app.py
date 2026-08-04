@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from openai import OpenAI
 
 st.set_page_config(
-    page_title="500+ 단지 주거복지 위험도 & 대화 통합 관리 시스템",
+    page_title="단지 주거복지 위험도 & 대화 통합 관리 시스템",
     page_icon="🏢",
     layout="wide"
 )
@@ -164,8 +164,8 @@ with st.sidebar:
         except Exception as e:
             st.error(f"복원 실패: {e}")
 
-st.title("🏢 500+ 단지 다자간 대화 & 주거복지 위험도 통합 관리 시스템")
-st.caption("500개 이상의 단지별 상담 대화를 실시간 누적하고 4대 영역 진단 체크리스트를 통해 관심·주의·위험 단계를 자동 분석합니다.")
+st.title("🏢 단지 다자간 대화 & 주거복지 위험도 통합 관리 시스템")
+st.caption("단지별 상담 대화를 실시간 누적하고 4대 영역 진단 체크리스트를 통해 관심·주의·위험 단계를 자동 분석합니다.")
 
 # 통계 집계
 total_cases = len(shared_cases)
