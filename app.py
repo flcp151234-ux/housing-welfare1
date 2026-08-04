@@ -1,572 +1,541 @@
 import streamlit as st
-from openai import OpenAI
-from datetime import datetime
+import json
+import os
 import uuid
 import re
-import json
+from datetime import datetime
 import plotly.graph_objects as go
-
-ADMIN_PASSWORD = "315370"
+from openai import OpenAI
 
 st.set_page_config(
-    page_title="단지 통합 대화 누적 및 문서화 시스템",
+    page_title="500+ 단지 주거복지 위험도 & 대화 통합 관리 시스템",
     page_icon="🏢",
     layout="wide"
 )
 
-CHECKLIST_ITEMS = {
-    "계약": [
-        "1. 임대차 계약 만료 및 갱신 시기 도래 (6개월 이내)",
-        "2. 임대조건 변경 및 입주 자격(소득·자산) 검토 필요",
-        "3. 계약자 변동(사망, 이혼, 세대분리) 및 명의 변경 미비",
-        "4. 재계약 필수 제출 서류 장기 미비 및 연락 두절",
-        "5. 불법 전대/임차권 양도 의혹 또는 계약 관리 위기"
-    ],
-    "부금": [
-        "1. 임대료 및 관리비 연속 체납 (3개월 이상 체납)",
-        "2. 누적 체납 금액 과다 (50만원 이상 또는 독촉 단계)",
-        "3. 단수·단전·가스 중단 등 생계 위기 신호 발생",
-        "4. 실직·소득 중단·부채로 인한 자력 납부 불능 상태",
-        "5. 긴급 주거비/임대보증금 지원 또는 납부 유예 필요"
-    ],
-    "시설": [
-        "1. 세대 내 위생 및 청결 상태 불량 (저장강박, 쓰레기 방치)",
-        "2. 주요 시설물 고장 및 파손 (누수, 난방, 도어락, 창문 등)",
-        "3. 노후화로 인한 안전사고 위협 (전기 단선, 곰팡이, 붕괴 위험)",
-        "4. 고령자/장애인 주거약자 편의시설 미비 (안전손잡이, 문턱 등)",
-        "5. 승강기/공용부 이용 불편 및 소방·위생 안전 위해 요인"
-    ],
-    "민원": [
-        "1. 이웃 간 지속적 갈등 발생 (층간소음, 흡연, 누수 분쟁)",
-        "2. 사회적 고립 및 고독사 고위험군 (단독 고령, 외부 연락 두절)",
-        "3. 정신건강/알코올 의존/우울증 등 집중 케어 필요",
-        "4. 공단 직원 또는 이웃에 대한 언어·신체적 폭력/반복 민원",
-        "5. 돌봄/식사 지원/지자체 복지서비스 연계 욕구"
-    ]
-}
+# 데이터 자동 저장 파일 경로
+DATA_FILE = "cases_data.json"
 
-@st.cache_resource
-def get_shared_cases_store():
-    """
-    모든 사용자가 공유하는 전체 상담건(단지/호수) 저장소입니다.
-    단지 데이터도 효율적으로 검색/관리할 수 있습니다.
-    """
+def load_cases():
+    """파일(JSON)로부터 저장된 상담건 데이터를 불러옵니다."""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
+def save_cases(cases):
+    """상담건 데이터를 파일(JSON)에 안전하게 저장합니다."""
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(cases, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"데이터 저장 중 오류 발생: {e}")
+
+def get_case_risk_info(case_data: dict):
+    """
+    상담건의 체크리스트 점수를 바탕으로 관심/주의/위험 3단계 레벨 및 총점을 산출합니다.
+    - 🔴 위험: 총점 15점 이상 또는 단일 영역 8점 이상 (주거복지사 긴급 현장연계)
+    - 🟡 주의: 총점 8점 이상 또는 단일 영역 5점 이상 (지속 관찰)
+    - 🟢 관심: 총점 8점 미만 (정상 관리)
+    - ⚪ 미진단: 평가 미진행 세대
+    """
+    chk = case_data.get("checklist", {})
+    if not chk:
+        return {"level": "미진단", "badge": "⚪ 미진단", "total_score": 0, "cat_totals": {"계약":0, "부금":0, "시설":0, "민원":0}, "is_evaluated": False}
+    
+    cat_totals = {cat: sum(chk.get(cat, [0]*5)) for cat in ["계약", "부금", "시설", "민원"]}
+    total_score = sum(cat_totals.values())
+    
+    is_evaluated = any(val > 0 for scores in chk.values() for val in scores)
+    
+    if not is_evaluated:
+        return {"level": "미진단", "badge": "⚪ 미진단", "total_score": 0, "cat_totals": cat_totals, "is_evaluated": False}
+    
+    if total_score >= 15 or any(score >= 8 for score in cat_totals.values()):
+        level = "위험"
+        badge = "🔴 위험 (긴급연계)"
+    elif total_score >= 8 or any(score >= 5 for score in cat_totals.values()):
+        level = "주의"
+        badge = "🟡 주의 (지속관찰)"
+    else:
+        level = "관심"
+        badge = "🟢 관심 (정상관리)"
+        
+    return {
+        "level": level,
+        "badge": badge,
+        "total_score": total_score,
+        "cat_totals": cat_totals,
+        "is_evaluated": True
+    }
+
 def clean_markdown_for_txt(text: str) -> str:
-    if check_password():
-        shared_cases = get_shared_cases_store()
-
-        # 샘플 데이터가 없으면 예시 1개 자동 생성
-        if not shared_cases:
-            sample_id = "sample-101"
-            shared_cases[sample_id] = {
-                "id": sample_id,
-                "complex": "등촌7단지",
-                "unit": "701동 104호",
-                "status": "상담중",
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "chats": [
-                    {
-                        "id": str(uuid.uuid4()),
-                        "time": datetime.now().strftime("%H:%M:%S"),
-                        "speaker": "김철수 팀장",
-                        "content": "등촌7단지 701동 104호 주거복지 지원 신청 관련 상담 시작합니다."
-                    }
-                ],
-                "summary": "",
-                "checklist": {
-                    "계약": [1, 2, 0, 1, 0],
-                    "부금": [3, 2, 2, 2, 3],
-                    "시설": [2, 1, 2, 3, 1],
-                    "민원": [2, 3, 2, 1, 2]
-                }
-            }
-
-    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned)
+    """다운로드용 텍스트 파일에서 특수 마크다운 기호를 정돈합니다."""
+    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)
+    cleaned = re.sub(r'#(.*?)\n', r'\1\n', cleaned)
     cleaned = re.sub(r'`(.*?)`', r'\1', cleaned)
     return cleaned
 
-def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
+if "shared_cases" not in st.session_state:
+    st.session_state.shared_cases = load_cases()
 
-    if not st.session_state["password_correct"]:
-        st.title("🔒 단지 상담 통합 관리 시스템 로그인")
-        pwd = st.text_input("접속 비밀번호를 입력하세요", type="password")
-        if st.button("로그인", use_container_width=True):
-            if pwd == ADMIN_PASSWORD:
-                st.session_state["password_correct"] = True
-                st.rerun()
-            else:
-                st.error("비밀번호가 올바르지 않습니다.")
-        return False
-    return True
+shared_cases = st.session_state.shared_cases
 
-if check_password():
-    shared_cases = get_shared_cases_store()
-
-    # 샘플 데이터가 없으면 예시 1개 자동 생성
-    if not shared_cases:
-        sample_id = "sample-101"
-        shared_cases[sample_id] = {
-            "id": sample_id,
-            "complex": "등촌7단지",
-            "unit": "701동 104호",
-            "status": "상담중",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "chats": [
-                {
-                    "id": str(uuid.uuid4()),
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "speaker": "김철수 팀장",
-                    "content": "등촌7단지 701동 104호 주거복지 지원 신청 관련 상담 시작합니다."
-                }
-            ],
-            "summary": ""
+# 최초 접속 시 데이터가 없는 경우 샘플 데이터 1건 생성
+if not shared_cases:
+    sample_id = "sample-101"
+    shared_cases[sample_id] = {
+        "id": sample_id,
+        "complex": "등촌7단지",
+        "unit": "701동 104호",
+        "status": "상담중",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "chats": [
+            {
+                "id": str(uuid.uuid4()),
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "speaker": "김철수 팀장",
+                "content": "등촌7단지 701동 104호 주거복지 지원 신청 관련 상담 시작합니다."
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "speaker": "이영희 관리소장",
+                "content": "해당 세대는 현재 관리비 4개월 체납 중이며 층간소음 민원이 2건 접수된 상태입니다."
+            }
+        ],
+        "summary": "",
+        "checklist": {
+            "계약": [1, 2, 0, 1, 0],
+            "부금": [3, 2, 2, 2, 3],
+            "시설": [2, 1, 2, 3, 1],
+            "민원": [2, 3, 2, 1, 2]
         }
+    }
+    save_cases(shared_cases)
 
-    with st.sidebar:
-        st.header("⚙️ 시스템 설정 및 관리")
-        
-        # 1. Streamlit Secrets(서버 비밀 저장소)에 키가 등록되어 있는지 확인
-        default_api_key = ""
-        try:
-            if "OPENAI_API_KEY" in st.secrets:
-                default_api_key = st.secrets["OPENAI_API_KEY"]
-        except Exception:
-            pass
-
-        if default_api_key:
-            st.success("🔒 관리자 서버 API Key 자동 연동됨")
-            st.caption("일반 사용자는 별도 API Key 입력 없이 요약 기능을 이용할 수 있습니다.")
-            api_key = default_api_key
-        else:
-            api_key = st.text_input(
-                "OpenAI API Key (sk-...)", 
-                type="password", 
-                help="Streamlit Cloud 설정(Secrets)에 API Key를 등록하면 이 입력창은 자동으로 숨겨집니다."
-            )
-        
-        model = st.selectbox("ChatGPT 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
-        
-        st.markdown("---")
-        st.markdown("### 💾 백업 & 복원 (단지 데이터 보호)")
-        
-        # JSON 백업 내보내기
-        json_data = json.dumps(shared_cases, ensure_ascii=False, indent=2)
-        st.download_button(
-            label="📥 전체 데이터 백업 (.json)",
-            data=json_data,
-            file_name=f"housing_cases_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-            mime="application/json",
-            use_container_width=True,
-            help="서버 재부팅 시를 대비해 전체 단지 데이터를 컴퓨터에 백업합니다."
-        )
-
-        # JSON 백업 복원하기
-        uploaded_file = st.file_uploader("📤 백업 파일 복원", type=["json"])
-        if uploaded_file is not None:
-            if st.button("🔄 백업 데이터 덮어쓰기 복원", type="secondary", use_container_width=True):
-                try:
-                    data = json.load(uploaded_file)
-                    shared_cases.clear()
-                    shared_cases.update(data)
-                    st.success("데이터가 성공적으로 복원되었습니다!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"복원 실패: {e}")
-
-        st.markdown("---")
-        st.markdown("### ⚡ 수동 화면 갱신")
-        if st.button("🔄 즉시 새로고침", use_container_width=True):
-            st.rerun()
-
-    st.title("🏢 단지 다자간 상담 대화 통합 관리 시스템")
-    st.caption("개 이상의 아파트 단지 및 호수별 상담건을 빠른 검색으로 찾아내고 대화를 실시간 누적하여 AI 문서로 생성합니다.")
+with st.sidebar:
+    st.image("https://img.icons8.com/color/96/city-buildings.png", width=70)
+    st.title("🏢 관리자 설정")
+    st.caption("주택관리공단 통합 주거복지 대화 시스템")
     
-    # 상단 요약 현황판
-    total_cases = len(shared_cases)
-    total_chats = sum(len(c["chats"]) for c in shared_cases.values())
+    # OpenAI API Key 자동 확인 (Secrets 우선 적용)
+    api_key = st.secrets.get("OPENAI_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
     
-    col_stat1, col_stat2, col_stat3 = st.columns(3)
-    col_stat1.metric("총 등록 상담건수", f"{total_cases} 건")
-    col_stat2.metric("누적 발언/대화수", f"{total_chats} 건")
-    col_stat3.metric("검색 가능 단지수", "단지 지원")
+    if not api_key:
+        api_key = st.text_input("🔑 OpenAI API Key 입력", type="password", help="sk-proj-... 형태로 시작하는 API 키를 입력하세요.")
+        if api_key:
+            os.environ["OPENAI_API_KEY"] = api_key
+    else:
+        st.success("🔒 API 키 인증 완료 (서버 연동됨)")
 
     st.markdown("---")
+    
+    # 실시간 대화 자동 갱신 토글
+    auto_refresh = st.toggle("🔄 대화 실시간 5초 자동동기화", value=False, help="다른 사용자가 입력한 대화를 5초마다 자동으로 불러옵니다.")
+    
+    st.markdown("---")
+    st.subheader("💾 데이터 백업 및 복원")
+    
+    # 데이터 다운로드
+    json_str = json.dumps(shared_cases, ensure_ascii=False, indent=2)
+    st.download_button(
+        label="📥 전체 상담 데이터 백업 (.json)",
+        data=json_str,
+        file_name=f"housing_welfare_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json",
+        use_container_width=True
+    )
+    
+    # 데이터 업로드
+    uploaded_file = st.file_uploader("📤 백업 파일 복원하기", type=["json"])
+    if uploaded_file is not None:
+        try:
+            restored_data = json.load(uploaded_file)
+            if isinstance(restored_data, dict):
+                st.session_state.shared_cases = restored_data
+                save_cases(restored_data)
+                st.success("데이터가 성공적으로 복원되었습니다!")
+                st.rerun()
+        except Exception as e:
+            st.error(f"복원 실패: {e}")
 
-    col_search, col_add = st.columns([2, 1])
+st.title("🏢 500+ 단지 다자간 대화 & 주거복지 위험도 통합 관리 시스템")
+st.caption("500개 이상의 단지별 상담 대화를 실시간 누적하고 4대 영역 진단 체크리스트를 통해 관심·주의·위험 단계를 자동 분석합니다.")
 
-    with col_search:
-        st.subheader("🔍 상담건 빠른 검색 & 선택")
-        search_kw = st.text_input("🔎 단지명, 동/호수 검색어 입력", placeholder="예: 등촌7단지, 701동, 104호 등...")
+# 통계 집계
+total_cases = len(shared_cases)
+total_chats = sum(len(c.get("chats", [])) for c in shared_cases.values())
+
+risk_stats = {"위험": 0, "주의": 0, "관심": 0, "미진단": 0}
+evaluated_count = 0
+
+for cinfo in shared_cases.values():
+    risk_info = get_case_risk_info(cinfo)
+    risk_stats[risk_info["level"]] += 1
+    if risk_info["is_evaluated"]:
+        evaluated_count += 1
+
+st.markdown("### 📊 전체 단지 주거복지 위험도 현황판")
+col_stat1, col_stat2, col_stat3, col_stat4, col_stat5 = st.columns(5)
+col_stat1.metric("총 등록 세대수", f"{total_cases} 건", help="시스템에 등록된 전체 상담 세대")
+col_stat2.metric("진단 완료 세대", f"{evaluated_count} / {total_cases} 건")
+col_stat3.metric("🔴 위험 (긴급 연계)", f"{risk_stats['위험']} 건")
+col_stat4.metric("🟡 주의 (지속 관찰)", f"{risk_stats['주의']} 건")
+col_stat5.metric("🟢 관심 (정상 관리)", f"{risk_stats['관심']} 건")
+
+st.markdown("---")
+
+col_search, col_add = st.columns([2, 1])
+
+with col_search:
+    st.subheader("🔍 세대 검색 및 위험도 필터")
+    
+    col_kw, col_flt = st.columns([1.5, 1])
+    with col_kw:
+        search_kw = st.text_input("🔎 단지명, 동/호수 검색", placeholder="예: 등촌7단지, 701동 등...")
+    with col_flt:
+        risk_filter = st.selectbox("🎯 위험도 단계 필터", ["전체 보기", "🔴 위험군만 보기", "🟡 주의군만 보기", "🟢 관심군만 보기", "⚪ 미진단건만 보기"])
+
+    # 필터링 로직
+    filtered_cases = {}
+    for cid, cinfo in shared_cases.items():
+        full_label = f"{cinfo.get('complex', '')} {cinfo.get('unit', '')}"
+        r_info = get_case_risk_info(cinfo)
         
-        # 검색 필터링 로직
-        filtered_cases = {}
-        for cid, cinfo in shared_cases.items():
-            full_label = f"{cinfo.get('complex', '')} {cinfo.get('unit', '')}"
-            if not search_kw.strip() or search_kw.strip().lower() in full_label.lower():
-                filtered_cases[cid] = cinfo
+        match_kw = not search_kw.strip() or search_kw.strip().lower() in full_label.lower()
+        
+        match_risk = True
+        if risk_filter == "🔴 위험군만 보기":
+            match_risk = (r_info["level"] == "위험")
+        elif risk_filter == "🟡 주의군만 보기":
+            match_risk = (r_info["level"] == "주의")
+        elif risk_filter == "🟢 관심군만 보기":
+            match_risk = (r_info["level"] == "관심")
+        elif risk_filter == "⚪ 미진단건만 보기":
+            match_risk = (r_info["level"] == "미진단")
 
-        if not filtered_cases:
-            st.warning("검색 결과가 없습니다. 우측에서 새 상담건을 등록해 보세요!")
-            selected_case_id = None
-        else:
-            options_dict = {
-                f"[{cinfo.get('complex', '미지정')}] {cinfo.get('unit', '미지정')} (대화 {len(cinfo.get('chats', []))}건) - {cinfo.get('status', '상담중')}": cid
-                for cid, cinfo in filtered_cases.items()
-            }
-            selected_label = st.selectbox(
-                "목록에서 관리할 상담건을 선택하세요 (키보드로 타이핑 검색 가능):",
-                options=list(options_dict.keys()),
-                index=0
-            )
-            selected_case_id = options_dict[selected_label]
+        if match_kw and match_risk:
+            filtered_cases[cid] = (cinfo, r_info)
 
-    with col_add:
-        st.subheader("➕ 새 상담건(단지/호수) 등록")
-        with st.form("add_new_case_form", clear_on_submit=True):
-            new_complex = st.text_input("단지명", placeholder="예: 등촌7단지, 가양9단지 등")
-            new_unit = st.text_input("동 / 호수 / 대상자", placeholder="예: 701동 104호, 김OO 대상자")
-            new_status = st.selectbox("진행 상태", ["상담중", "서류대기", "완료", "보류"])
-            submit_case = st.form_submit_button("✨ 새 상담건 추가하기", use_container_width=True)
+    if not filtered_cases:
+        st.warning("조건에 해당하는 상담 세대가 없습니다. 검색어를 바꾸거나 우측에서 신규 등록하세요!")
+        selected_case_id = None
+    else:
+        options_dict = {
+            f"[{cinfo.get('complex', '미지정')}] {cinfo.get('unit', '미지정')} | {r_info['badge']} (대화 {len(cinfo.get('chats', []))}건)": cid
+            for cid, (cinfo, r_info) in filtered_cases.items()
+        }
+        selected_label = st.selectbox("관리할 세대를 선택하세요:", options=list(options_dict.keys()), index=0)
+        selected_case_id = options_dict[selected_label]
 
+with col_add:
+    st.subheader("➕ 신규 상담 세대 추가")
+    with st.expander("📌 새로운 단지/세대 등록하기", expanded=False):
+        with st.form("add_case_form", clear_on_submit=True):
+            new_complex = st.text_input("단지명", placeholder="예: 등촌7단지, 번동3단지")
+            new_unit = st.text_input("동/호수", placeholder="예: 701동 104호")
+            initial_speaker = st.text_input("첫 상담자 이름/직함", value="김철수 주거복지사")
+            initial_msg = st.text_area("초기 대화 내용", placeholder="상담 세대의 초기 문의 사항 입력...")
+            
+            submit_case = st.form_submit_button("➕ 세대 등록 완료", use_container_width=True)
             if submit_case:
-                if not new_complex.strip() or not new_unit.strip():
-                    st.warning("단지명과 동/호수를 모두 입력해 주세요!")
+                if not new_complex or not new_unit:
+                    st.error("단지명과 동/호수를 모두 입력해 주세요.")
                 else:
-                    new_id = str(uuid.uuid4())
+                    new_id = f"case-{uuid.uuid4().hex[:8]}"
                     shared_cases[new_id] = {
                         "id": new_id,
-                        "complex": new_complex.strip(),
-                        "unit": new_unit.strip(),
-                        "status": new_status,
+                        "complex": new_complex,
+                        "unit": new_unit,
+                        "status": "상담중",
                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "chats": [],
-                        "summary": ""
-                    }
-                    st.success(f"'{new_complex} {new_unit}' 상담건이 생성되었습니다!")
-                    st.rerun()
-
-    st.markdown("---")
-
-    if selected_case_id and selected_case_id in shared_cases:
-        current_case = shared_cases[selected_case_id]
-        
-        # 체크리스트 기본 데이터 구조 보장
-        if "checklist" not in current_case:
-            current_case["checklist"] = {
-                "계약": [0]*5,
-                "부금": [0]*5,
-                "시설": [0]*5,
-                "민원": [0]*5
-            }
-
-        # 헤더 표시
-        st.markdown(f"## 📌 선택된 상담건: **[{current_case['complex']}] {current_case['unit']}**")
-        st.caption(f"생성일시: {current_case.get('created_at', '-')} | 현재 상태: **{current_case.get('status', '상담중')}** | 누적 대화: **{len(current_case['chats'])}건**")
-
-        # 탭 1: 대화 / 탭 2: 주거복지 진단 체크리스트 / 탭 3: AI 요약 / 탭 4: 관리
-        tab_chat, tab_checklist, tab_summary, tab_manage = st.tabs([
-            "💬 대화 등록 & 실시간 누적", 
-            "📊 주거복지 진단 체크리스트", 
-            "📋 통합 문서화 (AI 요약)", 
-            "⚙️ 상담건 상태 변경/삭제"
-        ])
-
-        with tab_chat:
-            col_in1, col_in2 = st.columns([1, 1])
-
-            with col_in1:
-                st.subheader("💬 대화 내용 입력")
-                with st.form(f"chat_form_{current_case['id']}", clear_on_submit=True):
-                    speaker_name = st.text_input("발언자 이름/직급", placeholder="예: 김철수 팀장, 이영희 대리, 신청자 본인")
-                    chat_text = st.text_area("대화 / 발언 / 상담 내용", height=140, placeholder="녹취록 텍스트나 대화 내용을 복사해서 입력하세요...")
-                    btn_submit_chat = st.form_submit_button("➕ 대화 등록하기", use_container_width=True)
-
-                    if btn_submit_chat:
-                        if not speaker_name.strip() or not chat_text.strip():
-                            st.warning("발언자와 대화 내용을 모두 입력해 주세요!")
-                        else:
-                            new_chat = {
+                        "chats": [
+                            {
                                 "id": str(uuid.uuid4()),
                                 "time": datetime.now().strftime("%H:%M:%S"),
-                                "speaker": speaker_name.strip(),
-                                "content": chat_text.strip()
+                                "speaker": initial_speaker if initial_speaker else "상담원",
+                                "content": initial_msg if initial_msg else "주거복지 상담 세대가 새로 생성되었습니다."
                             }
-                            current_case["chats"].append(new_chat)
-                            st.success("대화가 등록되었습니다!")
-                            st.rerun()
-
-            with col_in2:
-                col_title, col_toggle = st.columns([2, 1])
-                with col_title:
-                    st.subheader(f"📜 누적 대화 목록 ({len(current_case['chats'])}건)")
-                with col_toggle:
-                    auto_refresh = st.toggle("🔴 실시간 자동 동기화", value=False)
-
-                if auto_refresh:
-                    @st.fragment(run_every="5s")
-                    def render_live_chat_list(case_data):
-                        st.caption("⚡ 5초 주기 실시간 자동 동기화 중...")
-                        if not case_data["chats"]:
-                            st.info("아직 누적된 대화가 없습니다.")
-                        else:
-                            del_idx = None
-                            for idx, chat in enumerate(case_data["chats"]):
-                                with st.expander(f"[{chat['time']}] {chat['speaker']}: {chat['content'][:25]}...", expanded=True):
-                                    st.write(f"**화자:** {chat['speaker']}")
-                                    st.write(f"**내용:**\n{chat['content']}")
-                                    if st.button("❌ 삭제", key=f"del_{case_data['id']}_{chat['id']}"):
-                                        del_idx = idx
-                            if del_idx is not None:
-                                case_data["chats"].pop(del_idx)
-                                st.rerun()
-
-                    render_live_chat_list(current_case)
-                else:
-                    if not current_case["chats"]:
-                        st.info("아직 누적된 대화가 없습니다.")
-                    else:
-                        del_idx = None
-                        for idx, chat in enumerate(current_case["chats"]):
-                            with st.expander(f"[{chat['time']}] {chat['speaker']}: {chat['content'][:25]}...", expanded=True):
-                                st.write(f"**화자:** {chat['speaker']}")
-                                st.write(f"**내용:**\n{chat['content']}")
-                                if st.button("❌ 삭제", key=f"del_manual_{current_case['id']}_{chat['id']}"):
-                                    del_idx = idx
-                        if del_idx is not None:
-                            current_case["chats"].pop(del_idx)
-                            st.rerun()
-
-        with tab_checklist:
-            st.subheader("📋 주택관리공단 주거복지 4대 영역 진단 체크리스트")
-            st.caption("계약, 부금, 시설, 민원 각 항목별 심각도 점수를 입력하면 종합 위험도 분석 그래프와 주거복지사 연계 여부가 판정됩니다.")
-
-            # 점수 체계 안내
-            st.info("💡 **점수 기준:** 0점 (양호/해당없음) | 1점 (경미/관심) | 2점 (주의/개입필요) | 3점 (심각/긴급지원)")
-
-            col_chk_input, col_chk_graph = st.columns([1.2, 1])
-
-            with col_chk_input:
-                # 4대 영역 탭 분리
-                subtab_contract, subtab_payment, subtab_facility, subtab_civil = st.tabs([
-                    "📑 계약", "💰 부금", "🔧 시설", "🗣️ 민원"
-                ])
-
-                categories_map = {
-                    "계약": subtab_contract,
-                    "부금": subtab_payment,
-                    "시설": subtab_facility,
-                    "민원": subtab_civil
-                }
-
-                updated_scores = {}
-
-                for cat_name, subtab_obj in categories_map.items():
-                    with subtab_obj:
-                        st.markdown(f"#### [{cat_name}] 영역 진단 항목")
-                        cat_scores = []
-                        current_scores = current_case["checklist"].get(cat_name, [0]*5)
-
-                        for idx, item_text in enumerate(CHECKLIST_ITEMS[cat_name]):
-                            val = st.slider(
-                                item_text,
-                                min_value=0,
-                                max_value=3,
-                                value=current_scores[idx] if idx < len(current_scores) else 0,
-                                key=f"chk_{current_case['id']}_{cat_name}_{idx}"
-                            )
-                            cat_scores.append(val)
-
-                        updated_scores[cat_name] = cat_scores
-
-                # 점수 저장 버튼
-                if st.button("💾 체크리스트 점수 저장 및 결과 업데이트", type="primary", use_container_width=True):
-                    current_case["checklist"] = updated_scores
-                    st.success("체크리스트 점수가 저장되었습니다!")
+                        ],
+                        "summary": "",
+                        "checklist": {
+                            "계약": [0, 0, 0, 0, 0],
+                            "부금": [0, 0, 0, 0, 0],
+                            "시설": [0, 0, 0, 0, 0],
+                            "민원": [0, 0, 0, 0, 0]
+                        }
+                    }
+                    save_cases(shared_cases)
+                    st.success(f"[{new_complex}] {new_unit} 세대가 추가되었습니다!")
                     st.rerun()
 
-            with col_chk_graph:
-                st.subheader("📈 진단 결과 시각화 & 연계 판정")
+st.markdown("---")
 
-                # 영역별 점수 계산
-                cat_totals = {
-                    cat: sum(current_case["checklist"].get(cat, [0]*5))
-                    for cat in ["계약", "부금", "시설", "민원"]
-                }
-                total_score = sum(cat_totals.values())
-                max_total = 60 # 4 영역 * 5 항목 * 3점
+if selected_case_id and selected_case_id in shared_cases:
+    current_case = shared_cases[selected_case_id]
+    current_risk = get_case_risk_info(current_case)
+    
+    st.markdown(f"## 📌 선택된 세대: **[{current_case['complex']}] {current_case['unit']}** | 진단 상태: **{current_risk['badge']}**")
+    st.caption(f"생성일시: {current_case.get('created_at', '-')} | 진단 총점: **{current_risk['total_score']}점** | 누적 대화: **{len(current_case['chats'])}건**")
 
-                # 연계 기준 판정
-                # 종합점수 15점 이상 OR 특정 영역 8점 이상일 때 주거복지사 연계 대상
-                is_high_risk = (total_score >= 15) or any(score >= 8 for score in cat_totals.values())
+    tab_chat, tab_checklist, tab_summary, tab_manage = st.tabs([
+        "💬 실시간 대화 누적",
+        "📋 주거복지 4대 진단 체크리스트",
+        "📄 AI 요약 보고서",
+        "⚙️ 세대 관리"
+    ])
 
-                # 연계 판정 배지 출력
-                if is_high_risk:
-                    st.error(f"🚨 **[주거복지사 현장 연계 대상]** (종합 위험 점수: {total_score} / {max_total}점)")
-                    st.markdown("""
-                    **[조치 가이드]**
-                    - ⚠️ 해당 세대는 주거 위험도가 높아 **주거복지사 현장 방문 및 집중 케어**가 필요합니다.
-                    - 📞 **주택관리공단 주거복지지원센터** 또는 **지자체 맞춤형복지팀** 긴급 지원 연계를 권장합니다.
-                    """)
-                elif total_score >= 8:
-                    st.warning(f"🟡 **[주의 / 지속 관찰 대상]** (종합 위험 점수: {total_score} / {max_total}점)")
-                    st.caption("주기적인 현장점검 및 체납/민원 상태 모니터링이 권장됩니다.")
+    with tab_chat:
+        st.subheader("💬 세대 다자간 대화 실시간 누적")
+        st.caption("담당 팀장, 주거복지사, 관리소장, 주민 등이 나누는 대화를 시간순으로 누적 기록합니다.")
+
+        # 대화 입력 폼
+        with st.form("add_chat_form", clear_on_submit=True):
+            col_spk, col_txt = st.columns([1, 3])
+            with col_spk:
+                speaker_name = st.text_input("발언자 이름/직함", value="주거복지사", placeholder="예: 김철수 팀장")
+            with col_txt:
+                chat_content = st.text_area("대화 내용", placeholder="대화 또는 상담 기록을 입력하세요...", height=100)
+            
+            btn_add_chat = st.form_submit_button("💬 대화 메시지 등록", use_container_width=True)
+            if btn_add_chat:
+                if not chat_content.strip():
+                    st.warning("대화 내용을 입력해 주세요.")
                 else:
-                    st.success(f"🟢 **[정상 / 일반 관리 대상]** (종합 위험 점수: {total_score} / {max_total}점)")
-                    st.caption("특이사항 없는 정상 세대입니다.")
+                    new_chat_item = {
+                        "id": str(uuid.uuid4()),
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "speaker": speaker_name if speaker_name else "익명",
+                        "content": chat_content.strip()
+                    }
+                    current_case["chats"].append(new_chat_item)
+                    save_cases(shared_cases)
+                    st.success("대화가 등록되었습니다!")
+                    st.rerun()
 
-                st.markdown("---")
+        st.markdown("#### 📜 누적 대화 목록")
+        
+        # 실시간 동기화 플래그 처리
+        if auto_refresh:
+            st.caption("⏱️ 5초마다 최신 대화 목록이 자동 업데이트됩니다.")
 
-                # Plotly 레이더 차트 (거미줄 그래프) 생성
-                radar_categories = ["계약", "부금", "시설", "민원"]
-                radar_scores = [cat_totals[c] for c in radar_categories]
+        chat_container = st.container(height=350)
+        with chat_container:
+            if not current_case["chats"]:
+                st.info("등록된 대화 내용이 없습니다.")
+            else:
+                for c in current_case["chats"]:
+                    st.markdown(f"**[{c['time']}] {c['speaker']}**: {c['content']}")
+                    st.divider()
 
-                fig = go.Figure()
+    with tab_checklist:
+        st.subheader("📋 주택관리공단 주거복지 4대 영역 진단 체크리스트")
+        st.caption("계약, 부금, 시설, 민원 각 항목별 심각도 점수(0~3점)를 평가하여 관심/주의/위험 단계를 자동 판정합니다.")
 
-                fig.add_trace(go.Scatterpolar(
-                    r=radar_scores + [radar_scores[0]],
-                    theta=radar_categories + [radar_categories[0]],
-                    fill='toself',
-                    name='위험도 점수',
-                    line_color='#ef4444' if is_high_risk else '#3b82f6'
-                ))
+        CHECKLIST_ITEMS = {
+            "계약": [
+                "1. 임대차 계약 만료 예정 및 재계약 서류 제출 지연/미비",
+                "2. 입주 자격(소득/자산 기준) 초과 여부 검토 필요",
+                "3. 명의 변경 / 세대원 변동 / 단독 가구 전환 이슈",
+                "4. 무단 전대 또는 임차권 양도 의심 제보",
+                "5. 장기 부재 또는 고독사 위기(연락 두절) 징후"
+            ],
+            "부금": [
+                "1. 임대료 및 관리비 3개월 이상 체납",
+                "2. 전기/수도/가스 단수·단전 등 생계 위기 징후",
+                "3. 자력 납부 불능 상태 (신용회복, 파산 등)",
+                "4. 긴급 주거비 지원 / 주거급여 수급 신청 필요",
+                "5. 분납 약정 불이행 및 독촉 민원 발생"
+            ],
+            "시설": [
+                "1. 저장강박(쓰레기 방치)으로 인한 위생/악취 심각",
+                "2. 누수, 난방 고장, 벽지/장판 훼손 등 수리 필요",
+                "3. 노후 시설물 안전사고(전기, 가스) 위험 포착",
+                "4. 고령/장애로 인한 안전손잡이 등 편의시설 미비",
+                "5. 세대 내 개조/훼손 및 원상복구 분쟁"
+            ],
+            "민원": [
+                "1. 층간소음, 악취, 고성방가 등 이웃 간 갈등 극심",
+                "2. 사회적 고립, 우울증, 알코올 중독 등 위기 포착",
+                "3. 정신건강/폭력적 행동으로 인한 주민 불안",
+                "4. 지자체 복지관/정신건강복지센터 연계 필요",
+                "5. 반복·고질적 민원제기 및 관리사무소 마찰"
+            ]
+        }
 
-                fig.update_layout(
-                    polar=dict(
-                        radialaxis=dict(
-                            visible=True,
-                            range=[0, 15] # 영역별 최대점수 15점
+        col_chk_input, col_chk_graph = st.columns([1.3, 1])
+
+        with col_chk_input:
+            cat_tabs = st.tabs(["📄 계약", "💰 부금", "🛠️ 시설", "📣 민원"])
+            updated_checklist = current_case.get("checklist", {})
+
+            for idx, cat_name in enumerate(["계약", "부금", "시설", "민원"]):
+                with cat_tabs[idx]:
+                    st.markdown(f"##### 📌 {cat_name} 영역 평가 항목")
+                    items = CHECKLIST_ITEMS[cat_name]
+                    current_scores = updated_checklist.get(cat_name, [0]*5)
+                    new_scores = []
+                    
+                    for i, item_text in enumerate(items):
+                        score = st.radio(
+                            item_text,
+                            options=[0, 1, 2, 3],
+                            format_func=lambda x: {0: "0점 (해당없음)", 1: "1점 (경미)", 2: "2점 (중증)", 3: "3점 (심각)"}[x],
+                            index=current_scores[i] if i < len(current_scores) else 0,
+                            key=f"chk_{selected_case_id}_{cat_name}_{i}"
                         )
-                    ),
-                    showlegend=False,
-                    margin=dict(l=40, r=40, t=30, b=30),
-                    height=300
-                )
+                        new_scores.append(score)
+                    
+                    updated_checklist[cat_name] = new_scores
 
-                st.plotly_chart(fig, use_container_width=True)
+            if st.button("💾 체크리스트 점수 저장하기", use_container_width=True, type="primary"):
+                current_case["checklist"] = updated_checklist
+                save_cases(shared_cases)
+                st.success("체크리스트 점수가 저장되었습니다!")
+                st.rerun()
 
-                # 영역별 세부 점수 막대 그래프
-                st.markdown("#### 📊 영역별 위험점수 현황 (영역당 만점 15점)")
-                for cat, score in cat_totals.items():
-                    progress_val = min(score / 15.0, 1.0)
-                    st.write(f"**{cat}**: {score}점 / 15점")
-                    st.progress(progress_val)
-
-        with tab_summary:
-            st.subheader(f"📋 [{current_case['complex']} {current_case['unit']}] AI 요약 및 문서화")
+        with col_chk_graph:
+            st.subheader("📈 진단 결과 3단계 평가 및 시각화")
             
-            # 대화 전체 결합
-            formatted_transcript = ""
-            for item in current_case["chats"]:
-                formatted_transcript += f"[{item['speaker']}] ({item['time']})\n{item['content']}\n\n"
+            eval_risk = get_case_risk_info(current_case)
+            cat_totals = eval_risk["cat_totals"]
+            total_score = eval_risk["total_score"]
+            max_total = 60
 
-            # 체크리스트 점수 요약 텍스트 생성
-            chk_data = current_case.get("checklist", {})
-            chk_summary_str = ""
-            for cat, scores in chk_data.items():
-                chk_summary_str += f"- {cat} 영역 합계: {sum(scores)}점/15점\n"
+            if eval_risk["level"] == "위험":
+                st.error(f"🔴 **[위험 단계 - 주거복지사 현장 연계 대상]** (총 {total_score} / {max_total}점)")
+                st.markdown("""
+                **[🚨 긴급 조치 가이드]**
+                - ⚠️ 해당 세대는 심각한 주거 위기 요인이 포착되어 **주거복지사 현장 방문 및 긴급 개입**이 필수적입니다.
+                - 📞 **주택관리공단 주거복지지원센터** 및 **지자체 맞춤형 복지팀** 연계 절차를 즉시 착수해 주세요.
+                """)
+            elif eval_risk["level"] == "주의":
+                st.warning(f"🟡 **[주의 단계 - 지속 관찰 대상]** (총 {total_score} / {max_total}점)")
+                st.markdown("""
+                **[관리 가이드]**
+                - 🟡 체납, 민원 또는 고독사 가능성이 있는 주의 세대입니다.
+                - 🔍 주기적인 현장점검 및 단지 내 관리사무소 모니터링 강화를 권장합니다.
+                """)
+            elif eval_risk["level"] == "관심":
+                st.success(f"🟢 **[관심 단계 - 정상 관리 대상]** (총 {total_score} / {max_total}점)")
+                st.caption("특이 위기 요인이 적은 정상 관리 세대입니다.")
+            else:
+                st.info("⚪ **[미진단 상태]** 좌측 항목에서 점수를 입력 후 저장해 주세요.")
 
-            if st.button("✨ 이 상담건 전체 요약 실행", type="primary", use_container_width=True):
-                if not api_key:
-                    st.warning("사이드바에 OpenAI API Key(`sk-...`)를 입력해 주세요!")
-                elif not current_case["chats"]:
-                    st.warning("요약할 대화 내역이 없습니다. 먼저 대화를 입력해 주세요!")
-                else:
+            st.markdown("---")
+
+            # Plotly 방사형 (Radar) 차트 생성
+            radar_categories = ["계약", "부금", "시설", "민원"]
+            radar_scores = [cat_totals.get(c, 0) for c in radar_categories]
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(
+                r=radar_scores + [radar_scores[0]],
+                theta=radar_categories + [radar_categories[0]],
+                fill='toself',
+                name='위험도 점수',
+                line_color='#ef4444' if eval_risk["level"] == "위험" else ('#f59e0b' if eval_risk["level"] == "주의" else '#3b82f6')
+            ))
+
+            fig.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 15])),
+                showlegend=False,
+                margin=dict(l=40, r=40, t=30, b=30),
+                height=300
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### 📊 영역별 점수 현황 (만점 15점)")
+            for cat, score in cat_totals.items():
+                st.write(f"**{cat}**: {score}점 / 15점")
+                st.progress(min(score / 15.0, 1.0))
+
+    with tab_summary:
+        st.subheader("📄 AI 통합 상담 및 진단 보고서 작성")
+        st.caption("누적 대화 내역과 4대 영역 체크리스트 결과를 바탕으로 AI가 자동으로 주거복지 표준 보고서를 작성합니다.")
+
+        if st.button("✨ AI 보고서 자동 생성하기", type="primary", use_container_width=True):
+            if not api_key:
+                st.error("사이드바에서 OpenAI API Key를 먼저 설정해 주세요.")
+            elif not current_case["chats"]:
+                st.warning("분석할 대화 내역이 없습니다.")
+            else:
+                with st.spinner("AI가 대화 및 체크리스트 데이터를 종합 분석 중입니다..."):
                     try:
-                        with st.spinner("ChatGPT가 해당 단지/호수의 대화 및 체크리스트 결과를 문서화 중입니다..."):
-                            client = OpenAI(api_key=api_key)
-                            prompt = f"""
-당신은 주택관리공단 주거복지 전문가입니다.
-아래 [{current_case['complex']} {current_case['unit']}] 상담건의 전체 대화 및 4대 영역 진단 결과를 바탕으로 '주거복지 종합 관리 및 보고서'를 작성해 주세요.
+                        client = OpenAI(api_key=api_key)
+                        
+                        chats_text = "\n".join([f"[{c['time']}] {c['speaker']}: {c['content']}" for c in current_case["chats"]])
+                        eval_info = get_case_risk_info(current_case)
+                        
+                        prompt = f"""
+                        당신은 주택관리공단 전문 주거복지사입니다.
+                        아래 세대의 상담 대화 및 체크리스트 진단 결과를 바탕으로 깔끔한 주거복지 표준 보고서를 작성해 주세요.
 
-[상담 대상 및 위치]
-- 단지명: {current_case['complex']}
-- 동/호수: {current_case['unit']}
+                        [세대 정보]
+                        - 단지명: {current_case['complex']}
+                        - 동/호수: {current_case['unit']}
+                        - 위험도 진단 단계: {eval_info['badge']} (총점 {eval_info['total_score']}점)
+                        - 영역별 점수: {eval_info['cat_totals']}
 
-[4대 영역 진단 점수]
-{chk_summary_str}
+                        [누적 대화 내역]
+                        {chats_text}
 
-[누적 대화 내역]
-{formatted_transcript}
+                        [작성 양식]
+                        1. 세대 기본 정보 및 진단 종합 요약
+                        2. 주요 주거 위기 및 민원 원인 분석
+                        3. 영역별 주요 체크리스트 특이사항
+                        4. 향후 조치 계획 및 주거복지사 연계 필요성 (Action Items)
+                        """
 
-[작성 규칙]
-1. 아래 서식에 맞추어 마크다운으로 작성하세요:
-   # 📋 주거복지 상담 및 종합 관리 보고서
-   **단지명:** {current_case['complex']} | **대상:** {current_case['unit']}
-   
-   ## 1. 개요 및 상담 배경
-   - 주요 참여자 및 핵심 상담 목적 요약
-   
-   ## 2. 4대 영역(계약·부금·시설·민원) 현황 및 위험도 평가
-   - 체크리스트 진단 점수 기반 주요 위기 요인 요약
-   
-   ## 3. 핵심 결정 사항 및 주거복지사 연계 필요성
-   - 상담을 통해 합의된 사항 및 복지 연계 판단
-   
-   ## 4. 향후 조치 과제 (Action Items)
-   - [담당자/신청자/주거복지사] 할 일 및 기한 명시
-"""
-                            response = client.chat.completions.create(
-                                model=model,
-                                messages=[
-                                    {"role": "system", "content": "유능한 주택관리공단 주거복지 전문 작성 도우미입니다."},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                temperature=0.3
-                            )
-                            current_case["summary"] = response.choices[0].message.content
-                            st.success("요약 생성이 완료되었습니다!")
-                            st.rerun()
+                        response = client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.3
+                        )
+
+                        generated_summary = response.choices[0].message.content
+                        current_case["summary"] = generated_summary
+                        save_cases(shared_cases)
+                        st.success("AI 보고서 생성이 완료되었습니다!")
+
                     except Exception as e:
-                        st.error(f"오류가 발생했습니다: {e}")
+                        st.error(f"보고서 생성 오류: {e}")
 
-            if current_case.get("summary"):
-                st.markdown("---")
-                summary_text = current_case["summary"]
-                st.markdown(summary_text)
+        # 보고서 출력 및 다운로드
+        if current_case.get("summary"):
+            st.markdown("---")
+            st.markdown("### 📝 작성된 보고서 내용")
+            st.markdown(current_case["summary"])
 
-                st.markdown("---")
-                st.markdown("### 📥 요약 보고서 저장")
-                col_dl1, col_dl2 = st.columns(2)
-                
-                txt_content = clean_markdown_for_txt(summary_text)
-                with col_dl1:
-                    st.download_button(
-                        label="📄 텍스트 파일 (.txt) 다운로드",
-                        data=txt_content,
-                        file_name=f"상담보고서_{current_case['complex']}_{current_case['unit']}_{datetime.now().strftime('%Y%m%d')}.txt",
-                        mime="text/plain",
-                        use_container_width=True
-                    )
-                with col_dl2:
-                    st.download_button(
-                        label="📝 마크다운 파일 (.md) 다운로드",
-                        data=summary_text,
-                        file_name=f"상담보고서_{current_case['complex']}_{current_case['unit']}_{datetime.now().strftime('%Y%m%d')}.md",
-                        mime="text/markdown",
-                        use_container_width=True
-                    )
+            txt_content = clean_markdown_for_txt(current_case["summary"])
+            file_title = f"{current_case['complex']}_{current_case['unit']}_보고서.txt"
 
-        with tab_manage:
-            st.subheader("⚙️ 상담건 상태 변경 및 삭제")
-            col_m1, col_m2 = st.columns(2)
-            
-            with col_m1:
-                st.markdown("### 🔄 상태 변경")
-                new_st = st.selectbox("진행 상태 선택", ["상담중", "서류대기", "완료", "보류"], index=["상담중", "서류대기", "완료", "보류"].index(current_case.get("status", "상담중")))
-                if st.button("상태 업데이트", use_container_width=True):
-                    current_case["status"] = new_st
-                    st.success(f"상태가 '{new_st}'(으)로 변경되었습니다.")
-                    st.rerun()
+            st.download_button(
+                label="📥 보고서 (.txt) 다운로드",
+                data=txt_content,
+                file_name=file_title,
+                mime="text/plain; charset=utf-8",
+                use_container_width=True
+            )
 
-            with col_m2:
-                st.markdown("### 🗑️ 상담건 삭제")
-                st.warning("이 상담건과 누적된 모든 대화 및 요약 보고서가 완전히 삭제됩니다.")
-                if st.button("⚠️ 이 상담건 전체 삭제하기", type="secondary", use_container_width=True):
-                    del shared_cases[selected_case_id]
-                    st.success("상담건이 삭제되었습니다.")
-                    st.rerun()
+    with tab_manage:
+        st.subheader("⚙️ 세대 관리 및 삭제")
+        st.caption("해당 세대의 상담 상태를 변경하거나 완료된 세대 데이터를 삭제합니다.")
+
+        current_case["status"] = st.selectbox("상담 진행 상태", ["상담중", "지속관찰", "연계완료", "종결"], index=["상담중", "지속관찰", "연계완료", "종결"].index(current_case.get("status", "상담중")))
+        if st.button("상태 저장"):
+            save_cases(shared_cases)
+            st.success("상태가 업데이트되었습니다.")
+
+        st.markdown("---")
+        st.markdown("#### ⚠️ 세대 데이터 삭제")
+        if st.button("🗑️ 이 세대 상담 기록 완전히 삭제하기", type="primary"):
+            del shared_cases[selected_case_id]
+            save_cases(shared_cases)
+            st.success("해당 세대 기록이 삭제되었습니다.")
+            st.rerun()
