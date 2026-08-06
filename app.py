@@ -15,17 +15,59 @@ st.set_page_config(
 # 데이터 파일 경로 설정 (자동 저장용)
 DATA_FILE = "cases_data.json"
 
-# JSON 파일에서 데이터 불러오기 함수
+def calculate_risk(scores):
+    """위험도 산정 기준: 종합 15점 이상 또는 단일 8점 이상 = 위험(Red)"""
+    if not isinstance(scores, dict):
+        return "관심"
+    total = sum(scores.values())
+    max_score = max(scores.values()) if scores else 0
+    
+    if total >= 15 or max_score >= 8:
+        return "위험"
+    elif total >= 8 or max_score >= 5:
+        return "주의"
+    else:
+        return "관심"
+
+def sanitize_case(c, index):
+    """구버전 데이터나 누락된 필드가 있을 경우 자동으로 기본값을 채워주는 데이터 보정 함수"""
+    if not isinstance(c, dict):
+        c = {}
+    
+    # ID가 없거나 비어있는 경우 자동 생성
+    if "id" not in c or not c["id"]:
+        c["id"] = f"CASE-2026-{index+1:03d}"
+        
+    if "complex" not in c or not c["complex"]:
+        c["complex"] = "행복마을 1단지"
+    if "unit" not in c or not c["unit"]:
+        c["unit"] = f"101동 {index+101}호"
+    if "resident_name" not in c or not c["resident_name"]:
+        c["resident_name"] = "입주민 님"
+    if "created_at" not in c or not c["created_at"]:
+        c["created_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    if "dialogue_history" not in c or not isinstance(c["dialogue_history"], list):
+        c["dialogue_history"] = []
+    if "ai_summary" not in c or not c["ai_summary"]:
+        c["ai_summary"] = "아직 생성된 상담 요약이 없습니다."
+    if "scores" not in c or not isinstance(c["scores"], dict):
+        c["scores"] = {"contract": 0, "dues": 0, "facility": 0, "grievance": 0}
+    if "risk_level" not in c or not c["risk_level"]:
+        c["risk_level"] = calculate_risk(c["scores"])
+        
+    return c
+
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, list):
+                    return [sanitize_case(item, i) for i, item in enumerate(data)]
         except Exception:
             return []
     return []
 
-# JSON 파일에 데이터 저장하기 함수
 def save_data(data):
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -33,7 +75,7 @@ def save_data(data):
     except Exception as e:
         st.error(f"데이터 저장 실패: {e}")
 
-# 🔒 비밀번호 로그인 인증 로직
+# 비밀번호 로그인 인증 로직
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "1234")  # Secrets 미설정 시 기본 비밀번호 "1234"
 
 if "authenticated" not in st.session_state:
@@ -43,7 +85,6 @@ if not st.session_state.authenticated:
     st.title("🔒 단지 통합 주거복지 관리 시스템 로그인")
     st.caption("본 시스템은 관계자 전용 보안 시스템입니다. 관리자 비밀번호를 입력해 주세요.")
     
-    # st.form으로 감싸서 엔터 키 입력 및 마우스 클릭 이벤트 콜백 충돌 완벽 방지
     with st.form("login_form", clear_on_submit=False):
         pwd_input = st.text_input("🔑 로그인 비밀번호", type="password", help="기본 비밀번호는 1234 입니다.")
         submit_btn = st.form_submit_button("🔓 시스템 로그인", type="primary", use_container_width=True)
@@ -58,7 +99,7 @@ if not st.session_state.authenticated:
     st.info("💡 비밀번호 변경은 Streamlit Secrets에서 `APP_PASSWORD = \"원하는비밀번호\"` 로 설정 가능합니다.")
     st.stop()
 
-# 최초 실행 시 저장된 파일에서 세션 데이터 로드
+# 최초 실행 시 저장된 파일에서 세션 데이터 로드 및 데이터 무결성 검증
 if "cases" not in st.session_state:
     loaded_cases = load_data()
     if not loaded_cases:
@@ -76,10 +117,10 @@ if "cases" not in st.session_state:
                 ],
                 "ai_summary": "■ 기본 정보: 행복마을 1단지 101동 502호 (김OO 님)\n■ 현황: 보일러 파손으로 한파 노출, 임대료/관리비 3개월 체납\n■ 조치 요청: 긴급 주거비 지원 신청 및 난방 시설 즉시 수리 연계 필요",
                 "scores": {
-                    "contract": 2,  # 계약
-                    "dues": 8,      # 부금
-                    "facility": 9,  # 시설
-                    "grievance": 6  # 민원
+                    "contract": 2,
+                    "dues": 8,
+                    "facility": 9,
+                    "grievance": 6
                 },
                 "risk_level": "위험"
             }
@@ -87,23 +128,13 @@ if "cases" not in st.session_state:
         save_data(loaded_cases)
     st.session_state.cases = loaded_cases
 
-if "selected_case_id" not in st.session_state and st.session_state.cases:
-    st.session_state.selected_case_id = st.session_state.cases[0]["id"]
+# 안정적인 세대 선택 ID 보장
+if st.session_state.cases:
+    if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in st.session_state.cases):
+        st.session_state.selected_case_id = st.session_state.cases[0].get("id")
 
-# OpenAI API 키 설정 (Secrets 우선, 없으면 사용자 수동 입력)
+# OpenAI API 키 설정
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-
-def calculate_risk(scores):
-    """위험도 산정 기준: 종합 15점 이상 또는 단일 8점 이상 = 위험(Red)"""
-    total = sum(scores.values())
-    max_score = max(scores.values()) if scores else 0
-    
-    if total >= 15 or max_score >= 8:
-        return "위험"
-    elif total >= 8 or max_score >= 5:
-        return "주의"
-    else:
-        return "관심"
 
 with st.sidebar:
     st.header("⚙️ 시스템 설정 & 관리")
@@ -118,7 +149,7 @@ with st.sidebar:
     if OPENAI_API_KEY:
         st.success("🔒 OpenAI API 키가 정상 연동되어 있습니다.")
     else:
-        st.warning("⚠️ 서버 Secrets에 API 키가 설정되지 않았습니다.")
+        st.warning("⚠️ 서버 Secrets에 API 키가 설정되지 않았증니다.")
         OPENAI_API_KEY = st.text_input("OpenAI API Key 수동 입력", type="password")
 
     st.divider()
@@ -199,23 +230,22 @@ col_m5.metric("📋 관리 대상 단지", "500+ 단지")
 
 st.divider()
 
-# 세대 선택 dropdown
-case_options = {c["id"]: f"[{c.get('risk_level','관심')}] {c['complex']} {c['unit']} - {c['resident_name']}" for c in filtered_cases}
-
-if not case_options:
+if not filtered_cases:
     st.warning("조건에 해당하는 검색 세대가 없습니다. 사이드바에서 필터를 변경하거나 세대를 등록해주세요.")
     st.stop()
 
-# 선택된 항목 유지
+# 세대 선택 dropdown 안전한 딕셔너리 빌드
+case_options = {c.get("id"): f"[{c.get('risk_level','관심')}] {c.get('complex','')} {c.get('unit','')} - {c.get('resident_name','')}" for c in filtered_cases}
+
 selected_id = st.selectbox(
     "📌 대상 세대 선택", 
     options=list(case_options.keys()), 
-    format_func=lambda x: case_options[x],
+    format_func=lambda x: case_options.get(x, x),
     index=0
 )
 
 # 현재 선택된 세대 객체
-current_case = next((c for c in st.session_state.cases if c["id"] == selected_id), st.session_state.cases[0])
+current_case = next((c for c in st.session_state.cases if c.get("id") == selected_id), st.session_state.cases[0])
 
 tab1, tab2, tab3 = st.tabs([
     "📋 주거복지 대화 및 AI 요약", 
@@ -224,7 +254,7 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 with tab1:
-    st.subheader(f"🗣️ {current_case['complex']} {current_case['unit']} ({current_case['resident_name']}) 대화 및 현장 기록")
+    st.subheader(f"🗣️ {current_case.get('complex')} {current_case.get('unit')} ({current_case.get('resident_name')}) 대화 및 현장 기록")
     
     col_chat, col_summary = st.columns([1.2, 1])
     
@@ -253,15 +283,15 @@ with tab1:
 
         st.divider()
         
-        # 대화 목록 출력 함수 (Fragment 지정 가능)
         def display_messages():
             st.write("**[누적 대화 목록]**")
-            if not current_case["dialogue_history"]:
+            history = current_case.get("dialogue_history", [])
+            if not history:
                 st.info("등록된 대화 내용이 없습니다.")
             else:
-                for idx, msg in enumerate(current_case["dialogue_history"]):
-                    badge = "🔵" if msg["speaker"] == "주거복지사" else ("🟢" if msg["speaker"] == "입주민" else "🟡")
-                    st.markdown(f"{badge} **[{msg['speaker']}]** `[{msg['time']}]`\n{msg['text']}")
+                for idx, msg in enumerate(history):
+                    badge = "🔵" if msg.get("speaker") == "주거복지사" else ("🟢" if msg.get("speaker") == "입주민" else "🟡")
+                    st.markdown(f"{badge} **[{msg.get('speaker','기타')}]** `[{msg.get('time','')}]`\n{msg.get('text','')}")
                     st.divider()
 
         if auto_sync:
@@ -276,17 +306,18 @@ with tab1:
         st.write("##### 🤖 AI 자동 문서화 및 보고서 요약")
         
         if st.button("✨ 전체 대화 내용 AI 자동 요약 생성", type="primary", use_container_width=True):
-            if not current_case["dialogue_history"]:
+            history = current_case.get("dialogue_history", [])
+            if not history:
                 st.warning("요약할 대화 내용이 없습니다.")
             elif not OPENAI_API_KEY:
                 st.error("OpenAI API 키가 필요합니다. 사이드바에서 키를 입력해주세요.")
             else:
-                with st.spinner("Gemini/GPT가 대화 내용을 분석하여 표준 문서를 작성 중입니다..."):
+                with st.spinner("AI가 대화 내용을 분석하여 표준 문서를 작성 중입니다..."):
                     try:
                         import openai
                         client = openai.OpenAI(api_key=OPENAI_API_KEY)
                         
-                        raw_dialogue = "\n".join([f"{m['speaker']}: {m['text']}" for m in current_case["dialogue_history"]])
+                        raw_dialogue = "\n".join([f"{m.get('speaker')}: {m.get('text')}" for m in history])
                         prompt = f"""
                         당신은 주택관리공단의 주거복지 전문가입니다. 아래 대화 내용을 바탕으로 표준 주거복지 상담보고서를 작성하세요.
                         
@@ -321,38 +352,36 @@ with tab2:
     col_chk, col_chart = st.columns([1.2, 1])
     
     with col_chk:
-        # 체크리스트 점수 계산을 위한 입력
         scores = current_case.get("scores", {"contract": 0, "dues": 0, "facility": 0, "grievance": 0})
         
         st.markdown("#### 1️⃣ 임대차 계약 (Contract)")
-        chk_c1 = st.checkbox("임대차 계약 만료 예정 및 미갱신 상태", value=(scores["contract"] >= 3))
-        chk_c2 = st.checkbox("소득/자격 초과로 인한 퇴거 위기 세대", value=(scores["contract"] >= 6))
-        chk_c3 = st.checkbox("불법 전대 또는 명의 도용/고독사 의심 세대", value=(scores["contract"] >= 9))
+        chk_c1 = st.checkbox("임대차 계약 만료 예정 및 미갱신 상태", value=(scores.get("contract", 0) >= 3))
+        chk_c2 = st.checkbox("소득/자격 초과로 인한 퇴거 위기 세대", value=(scores.get("contract", 0) >= 6))
+        chk_c3 = st.checkbox("불법 전대 또는 명의 도용/고독사 의심 세대", value=(scores.get("contract", 0) >= 9))
         
         c_score = (3 if chk_c1 else 0) + (3 if chk_c2 else 0) + (3 if chk_c3 else 0)
         
         st.markdown("#### 2️⃣ 부금 및 체납 (Dues)")
-        chk_d1 = st.checkbox("임대료 또는 관리비 3개월 이상 체납", value=(scores["dues"] >= 3))
-        chk_d2 = st.checkbox("단수/단전 또는 생계 위기 가구", value=(scores["dues"] >= 6))
-        chk_d3 = st.checkbox("자력 납부 불능 상태 (긴급 주거비 지원 필요)", value=(scores["dues"] >= 9))
+        chk_d1 = st.checkbox("임대료 또는 관리비 3개월 이상 체납", value=(scores.get("dues", 0) >= 3))
+        chk_d2 = st.checkbox("단수/단전 또는 생계 위기 가구", value=(scores.get("dues", 0) >= 6))
+        chk_d3 = st.checkbox("자력 납부 불능 상태 (긴급 주거비 지원 필요)", value=(scores.get("dues", 0) >= 9))
         
         d_score = (3 if chk_d1 else 0) + (3 if chk_d2 else 0) + (3 if chk_d3 else 0)
 
         st.markdown("#### 3️⃣ 주거 시설 및 환경 (Facility)")
-        chk_f1 = st.checkbox("보일러/누수/난방 파손 등 긴급 수리 필요", value=(scores["facility"] >= 3))
-        chk_f2 = st.checkbox("저장강박증(쓰레기 방치) 및 위생 극심 악화", value=(scores["facility"] >= 6))
-        chk_f3 = st.checkbox("주거약자 편의시설(안전손잡이 등) 미비 및 안전사고 위험", value=(scores["facility"] >= 9))
+        chk_f1 = st.checkbox("보일러/누수/난방 파손 등 긴급 수리 필요", value=(scores.get("facility", 0) >= 3))
+        chk_f2 = st.checkbox("저장강박증(쓰레기 방치) 및 위생 극심 악화", value=(scores.get("facility", 0) >= 6))
+        chk_f3 = st.checkbox("주거약자 편의시설(안전손잡이 등) 미비 및 안전사고 위험", value=(scores.get("facility", 0) >= 9))
         
         f_score = (3 if chk_f1 else 0) + (3 if chk_f2 else 0) + (3 if chk_f3 else 0)
 
         st.markdown("#### 4️⃣ 민원 및 사회적 고립 (Grievance)")
-        chk_g1 = st.checkbox("이웃 간 층간소음 또는 분쟁 빈발 세대", value=(scores["grievance"] >= 3))
-        chk_g2 = st.checkbox("사회적 고립/알코올/정신건강 고위험군", value=(scores["grievance"] >= 6))
-        chk_g3 = st.checkbox("외부 복지 서비스 강력 거부 또는 심각한 민원", value=(scores["grievance"] >= 9))
+        chk_g1 = st.checkbox("이웃 간 층간소음 또는 분쟁 빈발 세대", value=(scores.get("grievance", 0) >= 3))
+        chk_g2 = st.checkbox("사회적 고립/알코올/정신건강 고위험군", value=(scores.get("grievance", 0) >= 6))
+        chk_g3 = st.checkbox("외부 복지 서비스 강력 거부 또는 심각한 민원", value=(scores.get("grievance", 0) >= 9))
         
         g_score = (3 if chk_g1 else 0) + (3 if chk_g2 else 0) + (3 if chk_g3 else 0)
 
-        # 진단 결과 업데이트
         updated_scores = {
             "contract": c_score,
             "dues": d_score,
@@ -370,7 +399,6 @@ with tab2:
     with col_chart:
         st.markdown("#### 📈 영역별 취약도 레이더 차트")
         
-        # Plotly Radar Chart 생성
         categories = ['계약 (Contract)', '부금 (Dues)', '시설 (Facility)', '민원 (Grievance)']
         values = [
             updated_scores["contract"],
@@ -395,7 +423,6 @@ with tab2:
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # 위험도 진단 결과 및 연계 가이드
         risk = current_case.get("risk_level", "관심")
         total_score = sum(updated_scores.values())
         
@@ -425,31 +452,29 @@ with tab3:
     
     st.write(f"총 **{len(st.session_state.cases)}** 개의 세대 정보가 `cases_data.json` 에 안전하게 보존되고 있습니다.")
     
-    # 개별 세대 삭제 기능
     st.markdown("#### 🗑️ 선택 세대 삭제")
     col_del1, col_del2 = st.columns([3, 1])
     with col_del1:
-        st.write(f"현재 선택된 세대: **[{current_case['id']}] {current_case['complex']} {current_case['unit']} - {current_case['resident_name']}**")
+        st.write(f"현재 선택된 세대: **[{current_case.get('id')}] {current_case.get('complex')} {current_case.get('unit')} - {current_case.get('resident_name')}**")
     with col_del2:
         if st.button("❌ 선택 세대 삭제", type="secondary", use_container_width=True):
-            st.session_state.cases = [c for c in st.session_state.cases if c["id"] != current_case["id"]]
+            st.session_state.cases = [c for c in st.session_state.cases if c.get("id") != current_case.get("id")]
             save_data(st.session_state.cases)
             st.success("해당 세대가 삭제되었습니다.")
             st.rerun()
 
     st.divider()
     
-    # 전체 데이터 테이블 시각화
     st.markdown("#### 📋 전체 세대 진단 요약 목록")
     
     summary_list = []
     for c in st.session_state.cases:
         sc = c.get("scores", {"contract": 0, "dues": 0, "facility": 0, "grievance": 0})
         summary_list.append({
-            "ID": c["id"],
-            "단지명": c["complex"],
-            "동호수": c["unit"],
-            "성명": c["resident_name"],
+            "ID": c.get("id", ""),
+            "단지명": c.get("complex", ""),
+            "동호수": c.get("unit", ""),
+            "성명": c.get("resident_name", ""),
             "위험도": c.get("risk_level", "관심"),
             "계약점수": sc.get("contract", 0),
             "부금점수": sc.get("dues", 0),
