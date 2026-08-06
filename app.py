@@ -39,9 +39,9 @@ def sanitize_case(c, index):
         c["id"] = f"CASE-2026-{index+1:03d}"
         
     if "complex" not in c or not c["complex"]:
-        c["complex"] = "행복마을 1단지"
+        c["complex"] = "등촌7단지"
     if "unit" not in c or not c["unit"]:
-        c["unit"] = f"101동 {index+101}호"
+        c["unit"] = f"701동 {index+101}호"
     if "resident_name" not in c or not c["resident_name"]:
         c["resident_name"] = "입주민 님"
     if "created_at" not in c or not c["created_at"]:
@@ -107,15 +107,15 @@ if "cases" not in st.session_state:
         loaded_cases = [
             {
                 "id": "CASE-2026-001",
-                "complex": "행복마을 1단지",
-                "unit": "101동 502호",
+                "complex": "등촌7단지",
+                "unit": "701동 101호",
                 "resident_name": "김OO 님",
                 "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "dialogue_history": [
-                    {"speaker": "주거복지사", "text": "안녕하세요, 101동 502호 김OO 어르신 되시나요? 최근 임대료 체납 및 난방 파손 문의 건으로 방문 상담 드립니다.", "time": "10:00"},
+                    {"speaker": "주거복지사", "text": "안녕하세요, 701동 101호 김OO 어르신 되시나요? 최근 임대료 체납 및 난방 파손 문의 건으로 방문 상담 드립니다.", "time": "10:00"},
                     {"speaker": "입주민", "text": "네... 보일러가 고장났는데 수리비가 없어서 그냥 참고 지내고 있어요. 최근 병원비 때문에 관리비도 3달 정도 밀렸습니다.", "time": "10:02"}
                 ],
-                "ai_summary": "■ 기본 정보: 행복마을 1단지 101동 502호 (김OO 님)\n■ 현황: 보일러 파손으로 한파 노출, 임대료/관리비 3개월 체납\n■ 조치 요청: 긴급 주거비 지원 신청 및 난방 시설 즉시 수리 연계 필요",
+                "ai_summary": "■ 기본 정보: 등촌7단지 701동 101호 (김OO 님)\n■ 현황: 보일러 파손으로 한파 노출, 임대료/관리비 3개월 체납\n■ 조치 요청: 긴급 주거비 지원 신청 및 난방 시설 즉시 수리 연계 필요",
                 "scores": {
                     "contract": 2,
                     "dues": 8,
@@ -166,8 +166,8 @@ with st.sidebar:
     # 세대 등록
     st.subheader("➕ 신규 상담 세대 추가")
     with st.form("add_case_form", clear_on_submit=True):
-        new_complex = st.text_input("단지명", value="행복마을 1단지")
-        new_unit = st.text_input("동/호수", placeholder="102동 304호")
+        new_complex = st.text_input("단지명", value="등촌7단지")
+        new_unit = st.text_input("동/호수", placeholder="701동 102호")
         new_name = st.text_input("입주민 성명", placeholder="이OO 님")
         add_submit = st.form_submit_button("신규 등록", type="primary", use_container_width=True)
         
