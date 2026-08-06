@@ -166,13 +166,13 @@ with st.sidebar:
     # 세대 등록
     st.subheader("➕ 신규 상담 세대 추가")
     with st.form("add_case_form", clear_on_submit=True):
-        new_complex = st.text_input("단지명", value="등촌7단지")
-        new_unit = st.text_input("동/호수", placeholder="701동 102호")
-        new_name = st.text_input("입주민 성명", placeholder="이OO 님")
+        new_complex = st.text_input("단지명", placeholder="예: 등촌7단지")
+        new_unit = st.text_input("동/호수", placeholder="예: 701동 102호")
+        new_name = st.text_input("입주민 성명", placeholder="예: 이OO 님")
         add_submit = st.form_submit_button("신규 등록", type="primary", use_container_width=True)
         
         if add_submit:
-            if new_unit and new_name:
+            if new_complex and new_unit and new_name:
                 new_id = f"CASE-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
                 new_record = {
                     "id": new_id,
@@ -191,7 +191,7 @@ with st.sidebar:
                 st.success("신규 세대가 추가되었습니다!")
                 st.rerun()
             else:
-                st.error("동/호수와 입주민 성명을 입력해주세요.")
+                st.error("단지명, 동/호수, 입주민 성명을 모두 입력해주세요.")
 
 # 필터링 로직 적용
 filtered_cases = st.session_state.cases
