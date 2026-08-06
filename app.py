@@ -266,13 +266,13 @@ with tab1:
         
         # 대화 입력 폼
         with st.form("chat_input_form", clear_on_submit=True):
-            speaker = st.selectbox("발화자", ["주거복지사", "관리소장", "입주민", "지자체 담당자", "기타"])
+            speaker = st.text_input("발화자 (직접 입력)", placeholder="예: 주거복지사, 관리소장, 입주민, 지자체 담당자 등")
             message_text = st.text_area("대화 내용을 입력하세요", height=80, placeholder="예: 보일러 파손건으로 긴급 수리 지원 요청하셨습니다.")
             submitted = st.form_submit_button("대화 기록 추가", type="primary", use_container_width=True)
             
             if submitted and message_text.strip():
                 new_msg = {
-                    "speaker": speaker,
+                    "speaker": speaker.strip() if speaker.strip() else "기타",
                     "text": message_text.strip(),
                     "time": datetime.datetime.now().strftime("%H:%M")
                 }
@@ -283,9 +283,11 @@ with tab1:
 
         st.divider()
         
-        def display_messages():
+        def display_messages(case_obj=None):
+            if case_obj is None:
+                case_obj = current_case
             st.write("**[누적 대화 목록]**")
-            history = current_case.get("dialogue_history", [])
+            history = case_obj.get("dialogue_history", [])
             if not history:
                 st.info("등록된 대화 내용이 없습니다.")
             else:
@@ -297,10 +299,13 @@ with tab1:
         if auto_sync:
             @st.fragment(run_every=5)
             def live_chat_area():
-                display_messages()
+                # 5초마다 저장된 데이터 파일(cases_data.json)을 새로 불러와 실시간 화면 갱신
+                st.session_state.cases = load_data()
+                fresh_case = next((c for c in st.session_state.cases if c.get("id") == selected_id), current_case)
+                display_messages(fresh_case)
             live_chat_area()
         else:
-            display_messages()
+            display_messages(current_case)
 
     with col_summary:
         st.write("##### 🤖 AI 자동 문서화 및 보고서 요약")
