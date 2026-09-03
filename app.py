@@ -409,12 +409,27 @@ with tab1:
                     badge = "🔵" if msg.get("speaker") == "주거복지사" else ("🟢" if msg.get("speaker") == "입주민" else "🟡")
                     st.markdown(f"{badge} **[{msg.get('speaker','기타')}]** `[{msg.get('time','')}]`\n{msg.get('text','')}")
                     
-                    # 사진 및 동영상 첨부파일 미리보기 표시
-                    if msg.get("media_type") == "image" and msg.get("media_data"):
-                        st.image(msg.get("media_data"), caption="📷 현장 첨부 사진", use_container_width=True)
-                    elif msg.get("media_type") == "video" and msg.get("media_data"):
-                        st.video(msg.get("media_data"))
-                        st.caption("🎥 현장 첨부 동영상")
+                    # 사진 및 동영상 첨부파일 안전 출력 처리
+                    m_data = msg.get("media_data")
+                    m_type = msg.get("media_type")
+                    
+                    if m_type == "image" and m_data:
+                        if isinstance(m_data, str) and (m_data.startswith("data:image") or m_data.startswith("http://") or m_data.startswith("https://")):
+                            try:
+                                st.image(m_data, caption="📷 현장 첨부 사진", use_container_width=True)
+                            except Exception:
+                                st.caption(f"📷 현장 사진: {m_data}")
+                        else:
+                            st.caption(f"📷 현장 사진 상태: {m_data}")
+                    elif m_type == "video" and m_data:
+                        if isinstance(m_data, str) and (m_data.startswith("data:video") or m_data.startswith("http://") or m_data.startswith("https://")):
+                            try:
+                                st.video(m_data)
+                                st.caption("🎥 현장 첨부 동영상")
+                            except Exception:
+                                st.caption(f"🎥 현장 동영상: {m_data}")
+                        else:
+                            st.caption(f"🎥 현장 동영상 상태: {m_data}")
                         
                     st.divider()
 
