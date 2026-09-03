@@ -11,7 +11,7 @@ import pandas as pd
 # PDF 생성을 위한 reportlab 모듈 import
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Image as RLImage
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
@@ -164,7 +164,7 @@ def save_data(data):
             st.error(f"구글 시트 동기화 저장 실패: {e}")
 
 def create_pdf_report(case_info):
-    """나눔고딕 지원 한글 PDF 보고서를 생성하는 함수"""
+    """나눔고딕 지원 한글 PDF 보고서(현장 이미지 포함)를 생성하는 함수"""
     buffer = io.BytesIO()
     
     # 폰트 파일 탐색 (Streamlit Cloud 환경 및 다양한 경로 대응)
@@ -184,7 +184,6 @@ def create_pdf_report(case_info):
     for path in possible_font_paths:
         if os.path.exists(path):
             try:
-                # 폰트가 중복 등록되지 않도록 예외 처리 후 등록
                 if 'NanumGothic' not in pdfmetrics.getRegisteredFontNames():
                     pdfmetrics.registerFont(TTFont('NanumGothic', path))
                 font_name = 'NanumGothic'
@@ -193,7 +192,6 @@ def create_pdf_report(case_info):
                 font_error_msg = str(e)
                 continue
 
-    # 폰트 로드 실패 시 디버깅을 위한 경고 문구 출력
     if not font_name:
         st.error(f"⚠️ 한글 폰트(NanumGothic.ttf)를 로드하지 못했습니다. 프로젝트 루트에 파일이 있는지 확인해 주세요. (오류 메시지: {font_error_msg})")
         font_name = "Helvetica"
@@ -204,9 +202,11 @@ def create_pdf_report(case_info):
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName=font_name, fontSize=16, leading=20, alignment=1)
     meta_style = ParagraphStyle('MetaStyle', parent=styles['Normal'], fontName=font_name, fontSize=10, leading=14)
     body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontName=font_name, fontSize=10, leading=15)
+    sub_style = ParagraphStyle('SubHeader', parent=meta_style, fontSize=12, leading=16)
 
     elements = []
     
+    # 1. 헤더 및 기본 정보
     elements.append(Paragraph("<b>[주택관리공단] 주거복지 상담 및 현장 진단 보고서</b>", title_style))
     elements.append(Spacer(1, 15))
     elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=10))
@@ -220,12 +220,39 @@ def create_pdf_report(case_info):
     elements.append(Spacer(1, 10))
     elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=15))
 
+    # 2. AI 자동 요약
     raw_summary = case_info.get('ai_summary', '내용 없음')
     summary_text = raw_summary.replace('\n', '<br/>')
     
-    elements.append(Paragraph("<b>■ AI 자동 요약 및 종합 의견</b>", ParagraphStyle('SubHeader', parent=meta_style, fontSize=12, leading=16)))
+    elements.append(Paragraph("<b>■ AI 자동 요약 및 종합 의견</b>", sub_style))
     elements.append(Spacer(1, 8))
     elements.append(Paragraph(summary_text, body_style))
+    elements.append(Spacer(1, 15))
+
+    # 3. 현장 사진 첨부 로직
+    image_attachments = [
+        msg.get("media_data") for msg in case_info.get("dialogue_history", [])
+        if msg.get("media_type") == "image" and msg.get("media_data")
+    ]
+
+    if image_attachments:
+        elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=10))
+        elements.append(Paragraph("<b>■ 현장 첨부 사진</b>", sub_style))
+        elements.append(Spacer(1, 10))
+
+        for idx, img_b64 in enumerate(image_attachments):
+            try:
+                if "," in img_b64:
+                    img_data = base64.b64decode(img_b64.split(",")[1])
+                else:
+                    img_data = base64.b64decode(img_b64)
+                
+                img_stream = io.BytesIO(img_data)
+                rl_img = RLImage(img_stream, width=400, height=250)
+                elements.append(rl_img)
+                elements.append(Spacer(1, 10))
+            except Exception:
+                continue
 
     doc.build(elements)
     buffer.seek(0)
