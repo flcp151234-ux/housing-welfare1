@@ -96,8 +96,26 @@ def load_data():
             if records:
                 cases = []
                 for idx, row in enumerate(records):
-                    scores = json.loads(row.get("scores", "{}")) if row.get("scores") else {"contract":0,"dues":0,"facility":0,"grievance":0}
-                    dialogue = json.loads(row.get("dialogue_history", "[]")) if row.get("dialogue_history") else []
+                    # 점수 데이터 파싱
+                    scores_raw = row.get("scores", "{}")
+                    if isinstance(scores_raw, str):
+                        try:
+                            scores = json.loads(scores_raw) if scores_raw else {"contract":0,"dues":0,"facility":0,"grievance":0}
+                        except json.JSONDecodeError:
+                            scores = {"contract":0,"dues":0,"facility":0,"grievance":0}
+                    else:
+                        scores = scores_raw if isinstance(scores_raw, dict) else {"contract":0,"dues":0,"facility":0,"grievance":0}
+
+                    # 대화 내역 파싱
+                    dialogue_raw = row.get("dialogue_history", "[]")
+                    if isinstance(dialogue_raw, str):
+                        try:
+                            dialogue = json.loads(dialogue_raw) if dialogue_raw else []
+                        except json.JSONDecodeError:
+                            dialogue = []
+                    else:
+                        dialogue = dialogue_raw if isinstance(dialogue_raw, list) else []
+
                     c = {
                         "id": str(row.get("id", "")),
                         "complex": str(row.get("complex", "")),
@@ -128,38 +146,45 @@ def load_data():
     return []
 
 def save_data(data):
+    # 1. 로컬 파일 저장
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         st.error(f"로컬 파일 저장 실패: {e}")
 
+    # 2. 구글 시트 동기화 저장
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
             headers = ["id", "complex", "unit", "resident_name", "created_at", "risk_level", "scores", "dialogue_history", "ai_summary"]
             rows = [headers]
+            
             for item in data:
                 clean_dialogue = []
                 for msg in item.get("dialogue_history", []):
                     msg_copy = dict(msg)
+                    # 구글 시트 셀 용량 제한(50,000자) 대응: 대용량 이미지/동영상 base64 데이터 필터링
                     if msg_copy.get("media_type") == "video" and msg_copy.get("media_data"):
-                        msg_copy["media_data"] = "[🎥 동영상 현장 첨부 완료 - 웹 앱에서 확인 가능]"
+                        msg_copy["media_data"] = "[🎥 동영상 첨부 완료]"
+                    elif msg_copy.get("media_type") == "image" and msg_copy.get("media_data") and len(str(msg_copy.get("media_data"))) > 30000:
+                        msg_copy["media_data"] = "[📷 이미지 첨부 완료]"
                     clean_dialogue.append(msg_copy)
 
                 rows.append([
-                    item.get("id", ""),
-                    item.get("complex", ""),
-                    item.get("unit", ""),
-                    item.get("resident_name", ""),
-                    item.get("created_at", ""),
-                    item.get("risk_level", ""),
+                    str(item.get("id", "")),
+                    str(item.get("complex", "")),
+                    str(item.get("unit", "")),
+                    str(item.get("resident_name", "")),
+                    str(item.get("created_at", "")),
+                    str(item.get("risk_level", "")),
                     json.dumps(item.get("scores", {}), ensure_ascii=False),
                     json.dumps(clean_dialogue, ensure_ascii=False),
-                    item.get("ai_summary", "")
+                    str(item.get("ai_summary", ""))
                 ])
+            
             sheet.clear()
-            sheet.update(rows)
+            sheet.update(range_name='A1', values=rows)
         except Exception as e:
             st.error(f"구글 시트 동기화 저장 실패: {e}")
 
@@ -167,7 +192,6 @@ def create_pdf_report(case_info):
     """나눔고딕 지원 한글 PDF 보고서(현장 이미지 포함)를 생성하는 함수"""
     buffer = io.BytesIO()
     
-    # 폰트 파일 탐색 (Streamlit Cloud 환경 및 다양한 경로 대응)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     possible_font_paths = [
         os.path.join(current_dir, "NanumGothic.ttf"),
@@ -193,7 +217,6 @@ def create_pdf_report(case_info):
                 continue
 
     if not font_name:
-        st.error(f"⚠️ 한글 폰트(NanumGothic.ttf)를 로드하지 못했습니다. 프로젝트 루트에 파일이 있는지 확인해 주세요. (오류 메시지: {font_error_msg})")
         font_name = "Helvetica"
 
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
@@ -206,7 +229,6 @@ def create_pdf_report(case_info):
 
     elements = []
     
-    # 1. 헤더 및 기본 정보
     elements.append(Paragraph("<b>[주택관리공단] 주거복지 상담 및 현장 진단 보고서</b>", title_style))
     elements.append(Spacer(1, 15))
     elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=10))
@@ -220,7 +242,6 @@ def create_pdf_report(case_info):
     elements.append(Spacer(1, 10))
     elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=15))
 
-    # 2. AI 자동 요약
     raw_summary = case_info.get('ai_summary', '내용 없음')
     summary_text = raw_summary.replace('\n', '<br/>')
     
@@ -229,10 +250,9 @@ def create_pdf_report(case_info):
     elements.append(Paragraph(summary_text, body_style))
     elements.append(Spacer(1, 15))
 
-    # 3. 현장 사진 첨부 로직
     image_attachments = [
         msg.get("media_data") for msg in case_info.get("dialogue_history", [])
-        if msg.get("media_type") == "image" and msg.get("media_data")
+        if msg.get("media_type") == "image" and msg.get("media_data") and msg.get("media_data").startswith("data:image")
     ]
 
     if image_attachments:
@@ -490,7 +510,7 @@ with tab1:
                 }
                 current_case["dialogue_history"].append(new_msg)
                 save_data(st.session_state.cases)
-                st.success("대화 기록 및 미디어 첨부가 성공적으로 추가 및 저장되었습니다.")
+                st.success("대화 기록 및 미디어 첨부가 성공적으로 추가 및 구글 시트에 저장되었습니다.")
                 st.rerun()
 
         st.divider()
@@ -577,12 +597,11 @@ with tab1:
                         summary_result = response.choices[0].message.content
                         current_case["ai_summary"] = summary_result
                         save_data(st.session_state.cases)
-                        st.success("AI 보고서 요약 작성이 완료되었습니다!")
+                        st.success("AI 보고서 요약 작성이 완료되었으며 구글 시트에 저장되었습니다!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
 
-        # 사용자 편집 내용 반영을 위한 text_area 업데이트
         edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=300)
         if edited_summary != current_case.get("ai_summary", ""):
             current_case["ai_summary"] = edited_summary
@@ -590,7 +609,7 @@ with tab1:
 
         image_attachments = [
             msg.get("media_data") for msg in current_case.get("dialogue_history", [])
-            if msg.get("media_type") == "image" and msg.get("media_data")
+            if msg.get("media_type") == "image" and msg.get("media_data") and str(msg.get("media_data")).startswith("data:image")
         ]
         
         if image_attachments:
