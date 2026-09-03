@@ -1,5 +1,7 @@
 streamlit
 openai
 plotly
+pillow
 gspread
 google-auth
+reportlab
