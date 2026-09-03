@@ -4,16 +4,43 @@ import os
 import datetime
 import plotly.graph_objects as go
 
-# 1. 페이지 스펙 기본 설정
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    HAS_GSPREAD = True
+except ImportError:
+    HAS_GSPREAD = False
+
 st.set_page_config(
-    page_title="단지 통합 주거복지 관리 및 위험도 진단 시스템",
+    page_title="등촌 7단지 통합 주거복지 관리 및 위험도 진단 시스템",
     page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 데이터 파일 경로 설정 (자동 저장용)
+# 데이터 파일 경로 설정 (로컬 백업용)
 DATA_FILE = "cases_data.json"
+
+def get_gsheet_worksheet():
+    """Streamlit Secrets 정보를 활용하여 구글 시트 워크시트에 연결합니다."""
+    if not HAS_GSPREAD:
+        return None
+    
+    if "gcp_service_account" in st.secrets and "spreadsheet_url" in st.secrets:
+        try:
+            scope = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
+            client = gspread.authorize(credentials)
+            sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
+            return sheet
+        except Exception as e:
+            st.error(f"⚠️ 구글 시트 연동 중 오류 발생: {e}")
+            return None
+    return None
 
 def calculate_risk(scores):
     """위험도 산정 기준: 종합 15점 이상 또는 단일 8점 이상 = 위험(Red)"""
@@ -29,15 +56,13 @@ def calculate_risk(scores):
     else:
         return "관심"
 
-def sanitize_case(c, index):
+def sanitize_case(c, index=0):
     """구버전 데이터나 누락된 필드가 있을 경우 자동으로 기본값을 채워주는 데이터 보정 함수"""
     if not isinstance(c, dict):
         c = {}
     
-    # ID가 없거나 비어있는 경우 자동 생성
     if "id" not in c or not c["id"]:
         c["id"] = f"CASE-2026-{index+1:03d}"
-        
     if "complex" not in c or not c["complex"]:
         c["complex"] = "등촌7단지"
     if "unit" not in c or not c["unit"]:
@@ -58,6 +83,34 @@ def sanitize_case(c, index):
     return c
 
 def load_data():
+    """구글 시트가 연결되어 있다면 시트에서 데이터를 로드하고, 없을 경우 로컬 JSON 파일에서 읽어옵니다."""
+    sheet = get_gsheet_worksheet()
+    if sheet is not None:
+        try:
+            records = sheet.get_all_records()
+            if records:
+                cases = []
+                for idx, row in enumerate(records):
+                    scores = json.loads(row.get("scores", "{}")) if row.get("scores") else {"contract":0,"dues":0,"facility":0,"grievance":0}
+                    dialogue = json.loads(row.get("dialogue_history", "[]")) if row.get("dialogue_history") else []
+                    
+                    c = {
+                        "id": str(row.get("id", "")),
+                        "complex": str(row.get("complex", "")),
+                        "unit": str(row.get("unit", "")),
+                        "resident_name": str(row.get("resident_name", "")),
+                        "created_at": str(row.get("created_at", "")),
+                        "dialogue_history": dialogue,
+                        "ai_summary": str(row.get("ai_summary", "")),
+                        "scores": scores,
+                        "risk_level": str(row.get("risk_level", ""))
+                    }
+                    cases.append(sanitize_case(c, idx))
+                return cases
+        except Exception as e:
+            st.warning(f"구글 시트 읽기 실패, 로컬 데이터로 대체합니다: {e}")
+
+    # 로컬 JSON 로드
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -69,20 +122,46 @@ def load_data():
     return []
 
 def save_data(data):
+    """데이터를 로컬 파일 및 구글 시트에 동시에 동기화 저장합니다."""
+    # 1. 로컬 JSON 저장
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        st.error(f"데이터 저장 실패: {e}")
+        st.error(f"로컬 파일 저장 실패: {e}")
 
-# 비밀번호 로그인 인증 로직
-APP_PASSWORD = st.secrets.get("APP_PASSWORD", "1234")  # Secrets 미설정 시 기본 비밀번호 "1234"
+    # 2. 구글 시트 저장
+    sheet = get_gsheet_worksheet()
+    if sheet is not None:
+        try:
+            headers = ["id", "complex", "unit", "resident_name", "created_at", "risk_level", "scores", "dialogue_history", "ai_summary"]
+            rows = [headers]
+            
+            for item in data:
+                rows.append([
+                    item.get("id", ""),
+                    item.get("complex", ""),
+                    item.get("unit", ""),
+                    item.get("resident_name", ""),
+                    item.get("created_at", ""),
+                    item.get("risk_level", ""),
+                    json.dumps(item.get("scores", {}), ensure_ascii=False),
+                    json.dumps(item.get("dialogue_history", []), ensure_ascii=False),
+                    item.get("ai_summary", "")
+                ])
+            
+            sheet.clear()
+            sheet.update(rows)
+        except Exception as e:
+            st.error(f"구글 시트 동기화 저장 실패: {e}")
+
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "1234")
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.title("🔒 단지 통합 주거복지 관리 시스템 로그인")
+    st.title("🔒 등촌7단지 통합 주거복지 관리 시스템 로그인")
     st.caption("본 시스템은 관계자 전용 보안 시스템입니다. 관리자 비밀번호를 입력해 주세요.")
     
     with st.form("login_form", clear_on_submit=False):
@@ -99,11 +178,9 @@ if not st.session_state.authenticated:
     st.info("💡 비밀번호 변경은 Streamlit Secrets에서 `APP_PASSWORD = \"원하는비밀번호\"` 로 설정 가능합니다.")
     st.stop()
 
-# 최초 실행 시 저장된 파일에서 세션 데이터 로드 및 데이터 무결성 검증
 if "cases" not in st.session_state:
     loaded_cases = load_data()
     if not loaded_cases:
-        # 최초 접속 시 샘플 데이터 1건 자동 생성
         loaded_cases = [
             {
                 "id": "CASE-2026-001",
@@ -115,7 +192,7 @@ if "cases" not in st.session_state:
                     {"speaker": "주거복지사", "text": "안녕하세요, 701동 101호 김OO 어르신 되시나요? 최근 임대료 체납 및 난방 파손 문의 건으로 방문 상담 드립니다.", "time": "10:00"},
                     {"speaker": "입주민", "text": "네... 보일러가 고장났는데 수리비가 없어서 그냥 참고 지내고 있어요. 최근 병원비 때문에 관리비도 3달 정도 밀렸습니다.", "time": "10:02"}
                 ],
-                "ai_summary": "■ 기본 정보: 등촌7단지 701동 101호 (김OO 님)\n■ 현황: 보일러 파손으로 한파 노출, 임대료/관리비 3개월 체납\n■ 조치 요청: 긴급 주거비 지원 신청 및 난방 시설 즉시 수리 연계 필요",
+                "ai_summary": "■ 개요: 등촌7단지 701동 101호 (김OO 님)\n■ 현황: 보일러 파손으로 한파 노출, 임대료/관리비 3개월 체납\n■ 조치 요청: 긴급 주거비 지원 신청 및 난방 시설 즉시 수리 연계 필요",
                 "scores": {
                     "contract": 2,
                     "dues": 8,
@@ -128,28 +205,32 @@ if "cases" not in st.session_state:
         save_data(loaded_cases)
     st.session_state.cases = loaded_cases
 
-# 안정적인 세대 선택 ID 보장
 if st.session_state.cases:
     if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in st.session_state.cases):
         st.session_state.selected_case_id = st.session_state.cases[0].get("id")
 
-# OpenAI API 키 설정
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 with st.sidebar:
     st.header("⚙️ 시스템 설정 & 관리")
     st.write(f"👤 접속 상태: **인증 완료**")
+    
+    # 구글 시트 연동 상태 바 표시
+    if get_gsheet_worksheet() is not None:
+        st.success("🟢 구글 시트 영구 저장 연동 중")
+    else:
+        st.info("🟡 로컬 파일 저장 모드 (구글 시트 미연동)")
+
     if st.button("🚪 로그아웃", use_container_width=True):
         st.session_state.authenticated = False
         st.rerun()
     
     st.divider()
     
-    # API 키 상태 표시
     if OPENAI_API_KEY:
-        st.success("🔒 OpenAI API 키가 정상 연동되어 있습니다.")
+        st.success("🔒 OpenAI API 키 연동 완료")
     else:
-        st.warning("⚠️ 서버 Secrets에 API 키가 설정되지 않았증니다.")
+        st.warning("⚠️ OpenAI API 키 미설정")
         OPENAI_API_KEY = st.text_input("OpenAI API Key 수동 입력", type="password")
 
     st.divider()
@@ -163,7 +244,6 @@ with st.sidebar:
 
     st.divider()
     
-    # 세대 등록
     st.subheader("➕ 신규 상담 세대 추가")
     with st.form("add_case_form", clear_on_submit=True):
         new_complex = st.text_input("단지명", placeholder="예: 등촌7단지")
@@ -193,7 +273,6 @@ with st.sidebar:
             else:
                 st.error("단지명, 동/호수, 입주민 성명을 모두 입력해주세요.")
 
-# 필터링 로직 적용
 filtered_cases = st.session_state.cases
 
 if risk_filter == "🔴 위험군만 보기":
@@ -211,10 +290,9 @@ if search_query:
         or search_query.lower() in c.get("resident_name", "").lower()
     ]
 
-st.title("🏠 단지 통합 주거복지 관리 & 위험도 진단 시스템")
-st.caption("주택관리공단 현장 맞춤형: 계약, 부금, 시설, 민원 4대 영역 진단 및 주거복지사 연계 체계")
+st.title("🏠 등촌7단지 통합 주거복지 관리 & 위험도 진단 시스템")
+st.caption("주택관리공단 현장 맞춤형: 계약, 부금, 시설, 민원 4대 영역 진단 및 구글 시트 실시간 자동 보존 체계")
 
-# 상단 현황 대시보드
 col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
 
 total_count = len(st.session_state.cases)
@@ -234,7 +312,6 @@ if not filtered_cases:
     st.warning("조건에 해당하는 검색 세대가 없습니다. 사이드바에서 필터를 변경하거나 세대를 등록해주세요.")
     st.stop()
 
-# 세대 선택 dropdown 안전한 딕셔너리 빌드
 case_options = {c.get("id"): f"[{c.get('risk_level','관심')}] {c.get('complex','')} {c.get('unit','')} - {c.get('resident_name','')}" for c in filtered_cases}
 
 selected_id = st.selectbox(
@@ -244,13 +321,12 @@ selected_id = st.selectbox(
     index=0
 )
 
-# 현재 선택된 세대 객체
 current_case = next((c for c in st.session_state.cases if c.get("id") == selected_id), st.session_state.cases[0])
 
 tab1, tab2, tab3 = st.tabs([
     "📋 주거복지 대화 및 AI 요약", 
     "📊 4대 영역 체크리스트 & 위험도 진단", 
-    "📁 세대 관리 및 전체 데이터"
+    "📁 세대 관리 및 구글 시트 데이터"
 ])
 
 with tab1:
@@ -261,10 +337,8 @@ with tab1:
     with col_chat:
         st.write("##### 💬 현장 대화 입력 및 누적")
         
-        # 실시간 동기화 옵션
         auto_sync = st.toggle("🔴 실시간 자동 갱신 (5초 주기)", value=False, help="다자간 동시 접속 시 다른 사용자의 입력값을 5초마다 자동 불러옵니다.")
         
-        # 대화 입력 폼
         with st.form("chat_input_form", clear_on_submit=True):
             speaker = st.text_input("발화자 (직접 입력)", placeholder="예: 주거복지사, 관리소장, 입주민, 지자체 담당자 등")
             message_text = st.text_area("대화 내용을 입력하세요", height=80, placeholder="예: 보일러 파손건으로 긴급 수리 지원 요청하셨습니다.")
@@ -278,7 +352,7 @@ with tab1:
                 }
                 current_case["dialogue_history"].append(new_msg)
                 save_data(st.session_state.cases)
-                st.success("대화 기록이 추가되었습니다.")
+                st.success("대화 기록이 성공적으로 추가 및 저장되었습니다.")
                 st.rerun()
 
         st.divider()
@@ -299,7 +373,6 @@ with tab1:
         if auto_sync:
             @st.fragment(run_every=5)
             def live_chat_area():
-                # 5초마다 저장된 데이터 파일(cases_data.json)을 새로 불러와 실시간 화면 갱신
                 st.session_state.cases = load_data()
                 fresh_case = next((c for c in st.session_state.cases if c.get("id") == selected_id), current_case)
                 display_messages(fresh_case)
@@ -453,10 +526,43 @@ with tab2:
             st.info("정상 관리 세대입니다. 정기점검 시 상태를 확인하세요.")
 
 with tab3:
-    st.subheader("📁 세대 전체 관리 및 데이터 보존 현황")
+    st.subheader("📁 세대 전체 관리 및 데이터 영구 보존 현황")
     
-    st.write(f"총 **{len(st.session_state.cases)}** 개의 세대 정보가 `cases_data.json` 에 안전하게 보존되고 있습니다.")
+    if get_gsheet_worksheet() is not None:
+        st.success("🎉 **구글 시트(Google Sheets)와 연동되어 데이터가 실시간 영구 보존되고 있습니다.**")
+    else:
+        st.warning("⚠️ 현재 구글 시트 미연동 상태로, 로컬 파일에만 저장됩니다. 영구 보존을 위해 `google_sheets_setup_guide.md`를 참고하여 연동하세요.")
+
+    st.divider()
+
+    st.markdown("#### 💾 수동 백업 및 1초 복원 (비상용)")
     
+    col_bak1, col_bak2 = st.columns(2)
+    with col_bak1:
+        json_string = json.dumps(st.session_state.cases, ensure_ascii=False, indent=2)
+        st.download_button(
+            label="📥 전체 데이터 백업 다운로드 (.json)",
+            data=json_string,
+            file_name=f"housing_welfare_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            use_container_width=True
+        )
+    
+    with col_bak2:
+        uploaded_file = st.file_uploader("📤 백업 파일(.json) 선택하여 복원", type=["json"])
+        if uploaded_file is not None:
+            try:
+                restored_data = json.load(uploaded_file)
+                if isinstance(restored_data, list):
+                    st.session_state.cases = [sanitize_case(item, i) for i, item in enumerate(restored_data)]
+                    save_data(st.session_state.cases)
+                    st.success("🎉 데이터 복원이 성공적으로 완료되었습니다!")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"❌ 복원 실패: {e}")
+
+    st.divider()
+
     st.markdown("#### 🗑️ 선택 세대 삭제")
     col_del1, col_del2 = st.columns([3, 1])
     with col_del1:
