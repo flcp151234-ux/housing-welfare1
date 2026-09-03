@@ -111,7 +111,11 @@ def load_data():
                     cases.append(sanitize_case(c, idx))
                 return cases
         except Exception as e:
-            st.warning(f"구글 시트 읽기 실패, 로컬 데이터로 대체합니다: {e}")
+            # API 429 Quota Exceeded 발생 시 세션 데이터 유지 및 안내 메시지
+            if "429" in str(e) or "Quota" in str(e):
+                if "cases" in st.session_state and st.session_state.cases:
+                    return st.session_state.cases
+            st.warning(f"구글 시트 읽기 일시 지연 (기존 데이터 유지 중): {e}")
 
     # 로컬 JSON 로드
     if os.path.exists(DATA_FILE):
@@ -350,7 +354,7 @@ with tab1:
     with col_chat:
         st.write("##### 💬 현장 대화 및 사진/동영상 기록")
         
-        auto_sync = st.toggle("🔴 실시간 자동 갱신 (5초 주기)", value=False, help="다자간 동시 접속 시 다른 사용자의 입력값을 5초마다 자동 불러옵니다.")
+        auto_sync = st.toggle("🔴 실시간 자동 갱신 (15초 주기)", value=False, help="다자간 동시 접속 시 다른 사용자의 입력값을 15초마다 자동 불러옵니다.")
         
         with st.form("chat_input_form", clear_on_submit=True):
             speaker = st.text_input("발화자 (직접 입력)", placeholder="예: 주거복지사, 관리소장, 입주민, 지자체 담당자 등")
@@ -415,7 +419,7 @@ with tab1:
                     st.divider()
 
         if auto_sync:
-            @st.fragment(run_every=5)
+            @st.fragment(run_every=15)
             def live_chat_area():
                 st.session_state.cases = load_data()
                 fresh_case = next((c for c in st.session_state.cases if c.get("id") == selected_id), current_case)
