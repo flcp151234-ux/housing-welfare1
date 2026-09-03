@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import os
 import datetime
+import base64
 import plotly.graph_objects as go
 
 try:
@@ -12,7 +13,7 @@ except ImportError:
     HAS_GSPREAD = False
 
 st.set_page_config(
-    page_title="등촌 7단지 통합 주거복지 관리 및 위험도 진단 시스템",
+    page_title="등촌7단지 통합 주거복지 관리 및 위험도 진단 시스템",
     page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -79,6 +80,8 @@ def sanitize_case(c, index=0):
         c["scores"] = {"contract": 0, "dues": 0, "facility": 0, "grievance": 0}
     if "risk_level" not in c or not c["risk_level"]:
         c["risk_level"] = calculate_risk(c["scores"])
+    if "attachments" not in c or not isinstance(c["attachments"], list):
+        c["attachments"] = []
         
     return c
 
@@ -130,7 +133,7 @@ def save_data(data):
     except Exception as e:
         st.error(f"로컬 파일 저장 실패: {e}")
 
-    # 2. 구글 시트 저장
+    # 2. 구글 시트 저장 (셀 50,000자 용량 제한 방지 처리)
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
@@ -138,6 +141,16 @@ def save_data(data):
             rows = [headers]
             
             for item in data:
+                # 구글 시트 50,000자 제한 방지를 위해 대화 기록 내 대용량 미디어 데이터 경량화
+                clean_dialogue = []
+                for msg in item.get("dialogue_history", []):
+                    msg_copy = dict(msg)
+                    # 미디어 데이터가 존재하면 구글 시트 저장 시에는 텍스트 표기 형태로 전환
+                    if msg_copy.get("media_data"):
+                        m_type = "📷 사진" if msg_copy.get("media_type") == "image" else "🎥 동영상"
+                        msg_copy["media_data"] = f"[{m_type} 현장 첨부 완료 - 웹 앱에서 확인 가능]"
+                    clean_dialogue.append(msg_copy)
+
                 rows.append([
                     item.get("id", ""),
                     item.get("complex", ""),
@@ -146,7 +159,7 @@ def save_data(data):
                     item.get("created_at", ""),
                     item.get("risk_level", ""),
                     json.dumps(item.get("scores", {}), ensure_ascii=False),
-                    json.dumps(item.get("dialogue_history", []), ensure_ascii=False),
+                    json.dumps(clean_dialogue, ensure_ascii=False),
                     item.get("ai_summary", "")
                 ])
             
@@ -335,24 +348,47 @@ with tab1:
     col_chat, col_summary = st.columns([1.2, 1])
     
     with col_chat:
-        st.write("##### 💬 현장 대화 입력 및 누적")
+        st.write("##### 💬 현장 대화 및 사진/동영상 기록")
         
         auto_sync = st.toggle("🔴 실시간 자동 갱신 (5초 주기)", value=False, help="다자간 동시 접속 시 다른 사용자의 입력값을 5초마다 자동 불러옵니다.")
         
         with st.form("chat_input_form", clear_on_submit=True):
             speaker = st.text_input("발화자 (직접 입력)", placeholder="예: 주거복지사, 관리소장, 입주민, 지자체 담당자 등")
-            message_text = st.text_area("대화 내용을 입력하세요", height=80, placeholder="예: 보일러 파손건으로 긴급 수리 지원 요청하셨습니다.")
-            submitted = st.form_submit_button("대화 기록 추가", type="primary", use_container_width=True)
+            message_text = st.text_area("대화 및 현장 메모를 입력하세요", height=80, placeholder="예: 보일러 누수 현장 확인 사진 첨부합니다.")
             
-            if submitted and message_text.strip():
+            uploaded_file = st.file_uploader(
+                "📷 현장 사진 또는 🎥 동영상 첨부 (선택)", 
+                type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "avi"],
+                help="현장 파손 사진, 증빙 서류, 현장 녹화 동영상 등을 첨부할 수 있습니다."
+            )
+            
+            submitted = st.form_submit_button("기록 및 첨부파일 저장", type="primary", use_container_width=True)
+            
+            if submitted and (message_text.strip() or uploaded_file is not None):
+                media_type = None
+                media_data = None
+                
+                if uploaded_file is not None:
+                    file_bytes = uploaded_file.read()
+                    file_type = uploaded_file.type
+                    b64_str = base64.b64encode(file_bytes).decode("utf-8")
+                    media_data = f"data:{file_type};base64,{b64_str}"
+                    
+                    if "image" in file_type:
+                        media_type = "image"
+                    elif "video" in file_type:
+                        media_type = "video"
+                
                 new_msg = {
                     "speaker": speaker.strip() if speaker.strip() else "기타",
                     "text": message_text.strip(),
-                    "time": datetime.datetime.now().strftime("%H:%M")
+                    "time": datetime.datetime.now().strftime("%H:%M"),
+                    "media_type": media_type,
+                    "media_data": media_data
                 }
                 current_case["dialogue_history"].append(new_msg)
                 save_data(st.session_state.cases)
-                st.success("대화 기록이 성공적으로 추가 및 저장되었습니다.")
+                st.success("대화 기록 및 미디어 첨부가 성공적으로 추가 및 구글 시트에 저장되었습니다.")
                 st.rerun()
 
         st.divider()
@@ -360,7 +396,7 @@ with tab1:
         def display_messages(case_obj=None):
             if case_obj is None:
                 case_obj = current_case
-            st.write("**[누적 대화 목록]**")
+            st.write("**[누적 대화 및 미디어 기록 목록]**")
             history = case_obj.get("dialogue_history", [])
             if not history:
                 st.info("등록된 대화 내용이 없습니다.")
@@ -368,6 +404,14 @@ with tab1:
                 for idx, msg in enumerate(history):
                     badge = "🔵" if msg.get("speaker") == "주거복지사" else ("🟢" if msg.get("speaker") == "입주민" else "🟡")
                     st.markdown(f"{badge} **[{msg.get('speaker','기타')}]** `[{msg.get('time','')}]`\n{msg.get('text','')}")
+                    
+                    # 사진 및 동영상 첨부파일 미리보기 표시
+                    if msg.get("media_type") == "image" and msg.get("media_data"):
+                        st.image(msg.get("media_data"), caption="📷 현장 첨부 사진", use_container_width=True)
+                    elif msg.get("media_type") == "video" and msg.get("media_data"):
+                        st.video(msg.get("media_data"))
+                        st.caption("🎥 현장 첨부 동영상")
+                        
                     st.divider()
 
         if auto_sync:
