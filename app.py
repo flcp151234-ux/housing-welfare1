@@ -1,4 +1,4 @@
-import streamlit as st
+\import streamlit as st
 import json
 import os
 import datetime
@@ -167,7 +167,7 @@ def create_pdf_report(case_info):
     """나눔고딕 지원 한글 PDF 보고서를 생성하는 함수"""
     buffer = io.BytesIO()
     
-    # 폰트 경로 우선순위 설정 (현재 폴더 NanumGothic.ttf -> Linux 나눔고딕 -> Windows 맑은고딕)
+    # 폰트 경로 우선순위 설정
     possible_font_paths = [
         "NanumGothic.ttf",
         "./NanumGothic.ttf",
@@ -207,7 +207,9 @@ def create_pdf_report(case_info):
     elements.append(Spacer(1, 10))
     elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=15))
 
-    summary_text = case_info.get('ai_summary', '내용 없음').replace('\n', '<br/>')
+    raw_summary = case_info.get('ai_summary', '내용 없음')
+    summary_text = raw_summary.replace('\n', '<br/>')
+    
     elements.append(Paragraph("<b>■ AI 자동 요약 및 종합 의견</b>", ParagraphStyle('SubHeader', parent=meta_style, fontSize=12, leading=16)))
     elements.append(Spacer(1, 8))
     elements.append(Paragraph(summary_text, body_style))
@@ -536,10 +538,15 @@ with tab1:
                         current_case["ai_summary"] = summary_result
                         save_data(st.session_state.cases)
                         st.success("AI 보고서 요약 작성이 완료되었습니다!")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
 
-        st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=300)
+        # 사용자 편집 내용 반영을 위한 text_area 업데이트
+        edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=300)
+        if edited_summary != current_case.get("ai_summary", ""):
+            current_case["ai_summary"] = edited_summary
+            save_data(st.session_state.cases)
 
         image_attachments = [
             msg.get("media_data") for msg in current_case.get("dialogue_history", [])
