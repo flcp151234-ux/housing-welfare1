@@ -164,20 +164,26 @@ def save_data(data):
             st.error(f"구글 시트 동기화 저장 실패: {e}")
 
 def create_pdf_report(case_info):
-    """한글 PDF 보고서를 생성하는 함수"""
+    """나눔고딕 지원 한글 PDF 보고서를 생성하는 함수"""
     buffer = io.BytesIO()
     
-    font_path = "C:/Windows/Fonts/malgun.ttf"
-    if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+    # 폰트 경로 우선순위 설정 (현재 폴더 NanumGothic.ttf -> Linux 나눔고딕 -> Windows 맑은고딕)
+    possible_font_paths = [
+        "NanumGothic.ttf",
+        "./NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "C:/Windows/Fonts/malgun.ttf"
+    ]
     
     font_name = "Helvetica"
-    if os.path.exists(font_path):
-        try:
-            pdfmetrics.registerFont(TTFont('KoreanFont', font_path))
-            font_name = 'KoreanFont'
-        except Exception:
-            pass
+    for path in possible_font_paths:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont('NanumGothic', path))
+                font_name = 'NanumGothic'
+                break
+            except Exception:
+                continue
 
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     styles = getSampleStyleSheet()
