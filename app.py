@@ -167,23 +167,36 @@ def create_pdf_report(case_info):
     """나눔고딕 지원 한글 PDF 보고서를 생성하는 함수"""
     buffer = io.BytesIO()
     
-    # 폰트 경로 우선순위 설정
+    # 폰트 파일 탐색 (Streamlit Cloud 환경 및 다양한 경로 대응)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
     possible_font_paths = [
+        os.path.join(current_dir, "NanumGothic.ttf"),
         "NanumGothic.ttf",
         "./NanumGothic.ttf",
+        "/mount/src/housing-welfare1/NanumGothic.ttf",
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "C:/Windows/Fonts/malgun.ttf"
     ]
     
-    font_name = "Helvetica"
+    font_name = None
+    font_error_msg = ""
+    
     for path in possible_font_paths:
         if os.path.exists(path):
             try:
-                pdfmetrics.registerFont(TTFont('NanumGothic', path))
+                # 폰트가 중복 등록되지 않도록 예외 처리 후 등록
+                if 'NanumGothic' not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont('NanumGothic', path))
                 font_name = 'NanumGothic'
                 break
-            except Exception:
+            except Exception as e:
+                font_error_msg = str(e)
                 continue
+
+    # 폰트 로드 실패 시 디버깅을 위한 경고 문구 출력
+    if not font_name:
+        st.error(f"⚠️ 한글 폰트(NanumGothic.ttf)를 로드하지 못했습니다. 프로젝트 루트에 파일이 있는지 확인해 주세요. (오류 메시지: {font_error_msg})")
+        font_name = "Helvetica"
 
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     styles = getSampleStyleSheet()
@@ -217,7 +230,7 @@ def create_pdf_report(case_info):
     doc.build(elements)
     buffer.seek(0)
     return buffer.getvalue()
-
+    
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "1234")
 
 if "authenticated" not in st.session_state:
