@@ -6,12 +6,12 @@ import base64
 import io
 from PIL import Image
 import plotly.graph_objects as go
+import pandas as pd
 
 # PDF 생성을 위한 reportlab 모듈 import
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
-from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
@@ -167,10 +167,9 @@ def create_pdf_report(case_info):
     """한글 PDF 보고서를 생성하는 함수"""
     buffer = io.BytesIO()
     
-    # 폰트 설정 (OS별 시스템 한글 폰트 적용)
-    font_path = "C:/Windows/Fonts/malgun.ttf" # Windows 맑은 고딕
+    font_path = "C:/Windows/Fonts/malgun.ttf"
     if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf" # Linux 나눔고딕
+        font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
     
     font_name = "Helvetica"
     if os.path.exists(font_path):
@@ -443,7 +442,7 @@ with tab1:
                 }
                 current_case["dialogue_history"].append(new_msg)
                 save_data(st.session_state.cases)
-                st.success("대화 기록 및 미디어 첨부가 성공적으로 추가 및 구글 시트에 저장되었습니다.")
+                st.success("대화 기록 및 미디어 첨부가 성공적으로 추가 및 저장되었습니다.")
                 st.rerun()
 
         st.divider()
@@ -536,9 +535,6 @@ with tab1:
 
         st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=300)
 
-        # ---------------------------------------------------------
-        # [신규 기능] 1. 첨부 이미지 미리보기
-        # ---------------------------------------------------------
         image_attachments = [
             msg.get("media_data") for msg in current_case.get("dialogue_history", [])
             if msg.get("media_type") == "image" and msg.get("media_data")
@@ -554,13 +550,9 @@ with tab1:
                     except Exception:
                         pass
 
-        # ---------------------------------------------------------
-        # [신규 기능] 2. TXT / PDF 내보내기 버튼
-        # ---------------------------------------------------------
         st.markdown("##### 📥 보고서 파일 내보내기")
         col_exp1, col_exp2 = st.columns(2)
         
-        # TXT 파일 다운로드
         with col_exp1:
             report_txt_content = f"""[주택관리공단 주거복지 상담 보고서]
 --------------------------------------------------
@@ -582,7 +574,6 @@ with tab1:
                 use_container_width=True
             )
 
-        # PDF 파일 다운로드
         with col_exp2:
             try:
                 pdf_bytes = create_pdf_report(current_case)
@@ -704,7 +695,7 @@ with tab3:
     if get_gsheet_worksheet() is not None:
         st.success("🎉 **구글 시트(Google Sheets)와 연동되어 데이터가 실시간 영구 보존되고 있습니다.**")
     else:
-        st.warning("⚠️ 현재 구글 시트 미연동 상태로, 로컬 파일에만 저장됩니다. 영구 보존을 위해 `google_sheets_setup_guide.md`를 참고하여 연동하세요.")
+        st.warning("⚠️ 현재 구글 시트 미연동 상태로, 로컬 파일에만 저장됩니다.")
 
     st.divider()
 
@@ -764,8 +755,11 @@ with tab3:
             "부금점수": sc.get("dues", 0),
             "시설점수": sc.get("facility", 0),
             "민원점수": sc.get("grievance", 0),
-            "총점": sum(sc.values()),
-            "등록일시": c.get("created_at", "")
+            "총점": sum(sc.values())
         })
     
-    st.dataframe(summary_list, use_container_width=True)
+    if summary_list:
+        df_summary = pd.DataFrame(summary_list)
+        st.dataframe(df_summary, use_container_width=True, hide_index=True)
+    else:
+        st.info("등록된 세대가 없습니다.")
