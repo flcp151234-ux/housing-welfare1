@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import os
 import datetime
+from datetime import timezone, timedelta
 import base64
 import io
 from PIL import Image
@@ -30,6 +31,10 @@ st.set_page_config(
 )
 
 DATA_FILE = "cases_data.json"
+
+# 한국 표준시(KST, UTC+9) 시간 반환 함수
+def get_kst_now():
+    return datetime.datetime.now(timezone(timedelta(hours=9)))
 
 def get_gsheet_worksheet():
     if not HAS_GSPREAD:
@@ -75,7 +80,7 @@ def sanitize_case(c, index=0):
     if "resident_name" not in c or not c["resident_name"]:
         c["resident_name"] = "입주민 님"
     if "created_at" not in c or not c["created_at"]:
-        c["created_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        c["created_at"] = get_kst_now().strftime("%Y-%m-%d %H:%M")
     if "dialogue_history" not in c or not isinstance(c["dialogue_history"], list):
         c["dialogue_history"] = []
     if "ai_summary" not in c or not c["ai_summary"]:
@@ -249,7 +254,7 @@ def create_pdf_report(case_info):
     raw_summary = case_info.get('ai_summary', '내용 없음')
     summary_text = raw_summary.replace('\n', '<br/>')
     
-    elements.append(Paragraph("<b>■ AI 자동 요약 및 종합 의견</b>", sub_style))
+    elements.append(Paragraph("<b>■ AI 자동 요약 및 맞춤 복지 연계 안</b>", sub_style))
     elements.append(Spacer(1, 8))
     elements.append(Paragraph(summary_text, body_style))
     elements.append(Spacer(1, 15))
@@ -314,12 +319,12 @@ if "cases" not in st.session_state:
                 "complex": "등촌7단지",
                 "unit": "701동 101호",
                 "resident_name": "김OO 님",
-                "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "created_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
                 "dialogue_history": [
                     {"speaker": "주거복지사", "text": "안녕하세요, 701동 101호 김OO 어르신 되시나요? 최근 임대료 체납 및 난방 파손 문의 건으로 방문 상담 드립니다.", "time": "10:00"},
                     {"speaker": "입주민", "text": "네... 보일러가 고장났는데 수리비가 없어서 그냥 참고 지내고 있어요. 최근 병원비 때문에 관리비도 3달 정도 밀렸습니다.", "time": "10:02"}
                 ],
-                "ai_summary": "■ 개요: 등촌7단지 701동 101호 (김OO 님)\n■ 현황: 보일러 파손으로 한파 노출, 임대료/관리비 3개월 체납\n■ 조치 요청: 긴급 주거비 지원 신청 및 난방 시설 즉시 수리 연계 필요",
+                "ai_summary": "■ 개요: 등촌7단지 701동 101호 (김OO 님)\n■ 현황: 보일러 파손으로 한파 노출, 임대료/관리비 3개월 체납\n■ 조치 요청: 긴급 주거비 지원 신청 및 난방 시설 즉시 수리 연계 필요\n\n■ 💡 맞춤형 위기 지원 및 신청 안내\n• 임대료/관리비 체납 위기: 긴급복지 주거지원\n  - 신청 장소: 관할 동 주민센터 복지팀\n  - 지원 내용: 체납 임대료 및 생계비 지원\n• 보일러 파손: 주택관리공단 긴급 수리 연계 및 에너지 바우처\n  - 신청 장소: 관리사무소 및 동 주민센터",
                 "scores": {
                     "contract": 2,
                     "dues": 8,
@@ -379,13 +384,13 @@ with st.sidebar:
         
         if add_submit:
             if new_complex and new_unit and new_name:
-                new_id = f"CASE-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+                new_id = f"CASE-{get_kst_now().strftime('%Y%m%d%H%M%S')}"
                 new_record = {
                     "id": new_id,
                     "complex": new_complex,
                     "unit": new_unit,
                     "resident_name": new_name,
-                    "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "created_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
                     "dialogue_history": [],
                     "ai_summary": "아직 생성된 상담 요약이 없습니다.",
                     "scores": {"contract": 0, "dues": 0, "facility": 0, "grievance": 0},
@@ -508,7 +513,7 @@ with tab1:
                 new_msg = {
                     "speaker": speaker.strip() if speaker.strip() else "기타",
                     "text": message_text.strip(),
-                    "time": datetime.datetime.now().strftime("%H:%M"),
+                    "time": get_kst_now().strftime("%H:%M"),
                     "media_type": media_type,
                     "media_data": media_data
                 }
@@ -574,7 +579,7 @@ with tab1:
             elif not OPENAI_API_KEY:
                 st.error("OpenAI API 키가 필요합니다. 사이드바에서 키를 입력해주세요.")
             else:
-                with st.spinner("AI가 대화 내용을 분석하여 표준 문서를 작성 중입니다..."):
+                with st.spinner("AI가 대화 내용을 분석하여 표준 보고서 및 맞춤 복지 연계 안을 작성 중입니다..."):
                     try:
                         import openai
                         client = openai.OpenAI(api_key=OPENAI_API_KEY)
@@ -582,14 +587,21 @@ with tab1:
                         raw_dialogue = "\n".join([f"{m.get('speaker')}: {m.get('text')}" for m in history])
                         prompt = f"""
                         당신은 주택관리공단의 주거복지 전문가입니다. 아래 대화 내용을 바탕으로 표준 주거복지 상담보고서를 작성하세요.
-                        
+
                         [대화 내용]
                         {raw_dialogue}
-                        
+
                         [작성 양식]
                         ■ 개요 및 현황
                         ■ 주거 위기 주요 문제점 (계약/부금/시설/민원 관점)
                         ■ 향후 조치 및 주거복지사 지원 계획
+
+                        ■ 💡 맞춤형 위기 지원 및 신청 안내 (필수 작성)
+                        - 대화 내용 중 언급된 입주민의 위기 요소(예: 임대료/관리비 체납, 보일러/시설 파손, 저장강박/청소, 정신건강, 고립, 병원비 등)별로 구체적 연계 방안 작성
+                        - 각 위기 항목마다 아래 3가지 항목을 구체적으로 명시할 것:
+                          1) 지원 가능한 정부/지자체/공단 복지 제도명
+                          2) 신청/연계 기관 및 장소 (예: 관할 동 주민센터, 주택관리공단, 종합사회복지관, 보건소 정신건강복지센터 등)
+                          3) 지원받을 수 있는 주요 내용 및 수칙
                         """
                         
                         response = client.chat.completions.create(
@@ -601,12 +613,12 @@ with tab1:
                         summary_result = response.choices[0].message.content
                         current_case["ai_summary"] = summary_result
                         save_data(st.session_state.cases)
-                        st.success("AI 보고서 요약 작성이 완료되었으며 구글 시트에 저장되었습니다!")
+                        st.success("AI 보고서 요약 및 맞춤 복지 안내 작성이 완료되었으며 구글 시트에 저장되었습니다!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
 
-        edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=300)
+        edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=320)
         if edited_summary != current_case.get("ai_summary", ""):
             current_case["ai_summary"] = edited_summary
             save_data(st.session_state.cases)
@@ -639,7 +651,7 @@ with tab1:
 위험도: {current_case.get('risk_level')}
 --------------------------------------------------
 
-[AI 자동 요약 및 종합 의견]
+[AI 자동 요약 및 맞춤 복지 연계 안]
 {current_case.get('ai_summary', '')}
 """
             st.download_button(
@@ -783,7 +795,7 @@ with tab3:
         st.download_button(
             label="📥 전체 데이터 백업 다운로드 (.json)",
             data=json_string,
-            file_name=f"housing_welfare_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            file_name=f"housing_welfare_backup_{get_kst_now().strftime('%Y%m%d_%H%M%S')}.json",
             mime="application/json",
             use_container_width=True
         )
