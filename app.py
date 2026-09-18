@@ -146,17 +146,21 @@ def load_data():
     return []
 
 def save_data(data):
-    # 1. 로컬 파일 저장
+    # 1. 로컬 JSON 파일 저장
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         st.error(f"로컬 파일 저장 실패: {e}")
 
-    # 2. 구글 시트 동기화 저장
+    # 2. 구글 시트 안전 동기화 (전체 삭제 방식 제거 및 유실 차단)
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
+            # 보낼 데이터가 비어있다면 구글 시트를 건드리지 않고 중단 (데이터 유실 차단)
+            if not data:
+                return
+
             headers = ["id", "complex", "unit", "resident_name", "created_at", "risk_level", "scores", "dialogue_history", "ai_summary"]
             rows = [headers]
             
@@ -183,7 +187,7 @@ def save_data(data):
                     str(item.get("ai_summary", ""))
                 ])
             
-            sheet.clear()
+            # 기존 데이터를 안심하고 A1 셀부터 덮어쓰기 (sheet.clear() 호출 안함)
             sheet.update(range_name='A1', values=rows)
         except Exception as e:
             st.error(f"구글 시트 동기화 저장 실패: {e}")
