@@ -94,6 +94,10 @@ def sanitize_case(c, index=0):
     return c
 
 def load_data():
+    # 세션 데이터 우선 반환 (구글 시트 429 읽기 요청 초과 방지)
+    if "cases" in st.session_state and st.session_state.cases:
+        return st.session_state.cases
+
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
@@ -135,9 +139,8 @@ def load_data():
                     cases.append(sanitize_case(c, idx))
                 return cases
         except Exception as e:
-            if "429" in str(e) or "Quota" in str(e):
-                if "cases" in st.session_state and st.session_state.cases:
-                    return st.session_state.cases
+            if "cases" in st.session_state and st.session_state.cases:
+                return st.session_state.cases
             st.warning(f"구글 시트 읽기 일시 지연 (기존 데이터 유지 중): {e}")
 
     if os.path.exists(DATA_FILE):
@@ -162,7 +165,6 @@ def save_data(data):
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
-            # 보낼 데이터가 비어있다면 구글 시트를 건드리지 않고 중단 (데이터 유실 차단)
             if not data:
                 return
 
@@ -173,7 +175,6 @@ def save_data(data):
                 clean_dialogue = []
                 for msg in item.get("dialogue_history", []):
                     msg_copy = dict(msg)
-                    # 구글 시트 셀 용량 제한(50,000자) 대응: 대용량 이미지/동영상 base64 데이터 필터링
                     if msg_copy.get("media_type") == "video" and msg_copy.get("media_data"):
                         msg_copy["media_data"] = "[🎥 동영상 첨부 완료]"
                     elif msg_copy.get("media_type") == "image" and msg_copy.get("media_data") and len(str(msg_copy.get("media_data"))) > 30000:
@@ -192,7 +193,6 @@ def save_data(data):
                     str(item.get("ai_summary", ""))
                 ])
             
-            # 기존 데이터를 안심하고 A1 셀부터 덮어쓰기 (sheet.clear() 호출 안함)
             sheet.update(range_name='A1', values=rows)
         except Exception as e:
             st.error(f"구글 시트 동기화 저장 실패: {e}")
@@ -212,7 +212,6 @@ def create_pdf_report(case_info):
     ]
     
     font_name = None
-    font_error_msg = ""
     
     for path in possible_font_paths:
         if os.path.exists(path):
@@ -221,8 +220,7 @@ def create_pdf_report(case_info):
                     pdfmetrics.registerFont(TTFont('NanumGothic', path))
                 font_name = 'NanumGothic'
                 break
-            except Exception as e:
-                font_error_msg = str(e)
+            except Exception:
                 continue
 
     if not font_name:
@@ -579,41 +577,65 @@ with tab1:
             elif not OPENAI_API_KEY:
                 st.error("OpenAI API 키가 필요합니다. 사이드바에서 키를 입력해주세요.")
             else:
-                with st.spinner("AI가 대화 내용을 분석하여 표준 보고서 및 맞춤 복지 연계 안을 작성 중입니다..."):
+                with st.spinner("AI가 대화 내용을 분석하여 위기 상황별 상세 기관, 전화번호, 신청 사이트를 추출 중입니다..."):
                     try:
                         import openai
                         client = openai.OpenAI(api_key=OPENAI_API_KEY)
                         
                         raw_dialogue = "\n".join([f"{m.get('speaker')}: {m.get('text')}" for m in history])
+                        
+                        # 범용 위기 상황 감지 및 기관/전화번호/사이트/서비스 자동 도출 프롬프트
                         prompt = f"""
-                        당신은 주택관리공단의 주거복지 전문가입니다. 아래 대화 내용을 바탕으로 표준 주거복지 상담보고서를 작성하세요.
+                        당신은 대한민국 주택관리공단의 현장 맞춤형 주거복지 전문가입니다. 
+                        아래 대화 내용을 바탕으로 표준 주거복지 상담보고서를 작성하세요.
+
+                        [대상 세대 정보]
+                        - 단지/동호수: {current_case.get('complex')} {current_case.get('unit')}
+                        - 입주민 성명: {current_case.get('resident_name')}
 
                         [대화 내용]
                         {raw_dialogue}
 
+                        [작성 지침 및 원칙]
+                        1. "관련 기관과의 협력 체계 강화", "지자체 연계 추진" 등의 추상적이고 단순한 표현은 절대 사용하지 마세요.
+                        2. 대화에 나타난 입주민의 모든 위기 요소(예: 치매/건강, 임대료/관리비 체납, 저장강박/쓰레기 방치, 정신건강/우울/알코올, 사회적 고립, 보일러/시설 파손 등)를 자동으로 추출하세요.
+                        3. 추출된 위기 요소별로 실제 입주민 또는 주거복지사가 즉시 연계 신청할 수 있도록 **복지 제도명, 전문 연계 기관, 대표 전화번호, 공식 신청 사이트(URL), 구체적 지원 서비스 목록**을 상세하게 작성하세요.
+
                         [작성 양식]
                         ■ 개요 및 현황
-                        ■ 주거 위기 주요 문제점 (계약/부금/시설/민원 관점)
-                        ■ 향후 조치 및 주거복지사 지원 계획
+                        ■ 주거 위기 주요 문제점
 
-                        ■ 💡 맞춤형 위기 지원 및 신청 안내 (필수 작성)
-                        - 대화 내용 중 언급된 입주민의 위기 요소(예: 임대료/관리비 체납, 보일러/시설 파손, 저장강박/청소, 정신건강, 고립, 병원비 등)별로 구체적 연계 방안 작성
-                        - 각 위기 항목마다 아래 3가지 항목을 구체적으로 명시할 것:
-                          1) 지원 가능한 정부/지자체/공단 복지 제도명
-                          2) 신청/연계 기관 및 장소 (예: 관할 동 주민센터, 주택관리공단, 종합사회복지관, 보건소 정신건강복지센터 등)
-                          3) 지원받을 수 있는 주요 내용 및 수칙
+                        ■ 💡 위기 상황별 맞춤 지원 기관 및 복지 제도 안내 (필수 작성)
+                        (대화에서 감지된 위기 유형별로 아래 포맷을 유지하며 구체적으로 작성하세요)
+
+                        • [위기 유형 1] (예: 치매 및 인지기능 장애 / 임대료 체납 / 저장강박 등)
+                          - 지원 복지 제도: (정확한 제도명)
+                          - 연계/신청 기관: (담당 공공기관 또는 전문 센터명)
+                          - 대표 전화번호: (해당 기관 또는 콜센터 대표전화, 예: ☎ 1899-9988, ☎ 129 등)
+                          - 공식 신청 사이트: (신청 가능한 웹사이트 URL, 예: 복지로 bokjiro.go.kr 등)
+                          - 신청 가능한 주요 서비스:
+                            1) (구체적 지원 서비스 1)
+                            2) (구체적 지원 서비스 2)
+                            3) (구체적 지원 서비스 3)
+
+                        • [위기 유형 2] (감지된 다른 위기 요소가 있을 경우 계속 작성)
+                          - 지원 복지 제도: ...
+                          - 연계/신청 기관: ...
+                          - 대표 전화번호: ...
+                          - 공식 신청 사이트: ...
+                          - 신청 가능한 주요 서비스: ...
                         """
                         
                         response = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role": "user", "content": prompt}],
-                            temperature=0.3
+                            temperature=0.2
                         )
                         
                         summary_result = response.choices[0].message.content
                         current_case["ai_summary"] = summary_result
                         save_data(st.session_state.cases)
-                        st.success("AI 보고서 요약 및 맞춤 복지 안내 작성이 완료되었으며 구글 시트에 저장되었습니다!")
+                        st.success("AI 보고서 요약 및 위기별 상세 기관/연락처/사이트 연계 안 작성이 완료되었습니다!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
