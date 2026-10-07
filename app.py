@@ -2,6 +2,8 @@ import streamlit as st
 import json
 import os
 import datetime
+import hashlib
+import hmac
 from datetime import timezone, timedelta
 import base64
 import io
@@ -24,36 +26,154 @@ except ImportError:
     HAS_GSPREAD = False
 
 st.set_page_config(
-    page_title="등촌7단지 통합 주거복지 관리 및 위험도 진단 시스템",
+    page_title="통합 주거복지 관리 및 위험도 진단 시스템",
     page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 DATA_FILE = "cases_data.json"
+COMPLEX_FILE = "complexes_data.json"
+
+# 관리자 비밀번호: Streamlit Secrets에서 ADMIN_PASSWORD로 설정하세요.
+ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", st.secrets.get("APP_PASSWORD", "1234"))
+
+def hash_password(password):
+    """PBKDF2-HMAC-SHA256 + 랜덤 salt로 단지 비밀번호를 안전하게 저장."""
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return f"pbkdf2_sha256$200000${salt.hex()}${digest.hex()}"
+
+def verify_password(password, stored_hash):
+    """신규 PBKDF2 해시와 이전 버전 SHA-256 해시를 모두 검증하여 기존 설정도 호환."""
+    try:
+        if str(stored_hash).startswith("pbkdf2_sha256$"):
+            _, iterations, salt_hex, digest_hex = str(stored_hash).split("$", 3)
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations)
+            ).hex()
+            return hmac.compare_digest(candidate, digest_hex)
+        legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(legacy, str(stored_hash))
+    except Exception:
+        return False
+
+def get_gspread_client():
+    if not HAS_GSPREAD:
+        return None
+    if "gcp_service_account" not in st.secrets or "spreadsheet_url" not in st.secrets:
+        return None
+    try:
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
+        return gspread.authorize(credentials)
+    except Exception as e:
+        st.error(f"⚠️ 구글 시트 인증 중 오류 발생: {e}")
+        return None
+
+def get_spreadsheet():
+    client = get_gspread_client()
+    if client is None:
+        return None
+    try:
+        return client.open_by_url(st.secrets["spreadsheet_url"])
+    except Exception as e:
+        st.error(f"⚠️ 구글 스프레드시트 연결 오류: {e}")
+        return None
+
+def load_complexes():
+    """단지 설정은 Google Sheets의 complexes 워크시트를 우선 사용하고 JSON은 비상 백업으로 사용."""
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is not None:
+        try:
+            try:
+                ws = spreadsheet.worksheet("complexes")
+            except gspread.WorksheetNotFound:
+                ws = spreadsheet.add_worksheet(title="complexes", rows=200, cols=5)
+                ws.update(range_name="A1", values=[["complex_name", "password_hash", "created_at", "updated_at"]])
+            records = ws.get_all_records()
+            data = {}
+            for row in records:
+                name = str(row.get("complex_name", "")).strip()
+                pwd_hash = str(row.get("password_hash", "")).strip()
+                if name and pwd_hash:
+                    data[name] = {
+                        "password_hash": pwd_hash,
+                        "created_at": str(row.get("created_at", "")),
+                        "updated_at": str(row.get("updated_at", ""))
+                    }
+            if data:
+                return data
+        except Exception as e:
+            st.warning(f"단지 설정 시트 읽기 지연: {e}")
+
+    if os.path.exists(COMPLEX_FILE):
+        try:
+            with open(COMPLEX_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data:
+                    return data
+        except Exception:
+            pass
+
+    initial_password = st.secrets.get("INITIAL_COMPLEX_PASSWORD", "1234")
+    data = {
+        "등촌7단지": {
+            "password_hash": hash_password(initial_password),
+            "created_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
+            "updated_at": get_kst_now().strftime("%Y-%m-%d %H:%M")
+        }
+    }
+    save_complexes(data)
+    return data
+
+def save_complexes(data):
+    """단지 설정을 로컬 백업 + Google Sheets complexes 워크시트에 저장."""
+    try:
+        with open(COMPLEX_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"단지 설정 로컬 백업 실패: {e}")
+
+    spreadsheet = get_spreadsheet()
+    if spreadsheet is not None:
+        try:
+            try:
+                ws = spreadsheet.worksheet("complexes")
+            except gspread.WorksheetNotFound:
+                ws = spreadsheet.add_worksheet(title="complexes", rows=max(200, len(data)+20), cols=5)
+            rows = [["complex_name", "password_hash", "created_at", "updated_at"]]
+            for name, info in sorted(data.items()):
+                rows.append([name, info.get("password_hash", ""), info.get("created_at", ""), info.get("updated_at", "")])
+            ws.clear()
+            ws.update(range_name="A1", values=rows)
+        except Exception as e:
+            st.error(f"단지 설정 Google Sheets 저장 실패: {e}")
+
+def ensure_complexes_from_cases(complexes, cases):
+    changed = False
+    initial_password = st.secrets.get("INITIAL_COMPLEX_PASSWORD", "1234")
+    now = get_kst_now().strftime("%Y-%m-%d %H:%M")
+    for case in cases:
+        name = str(case.get("complex", "")).strip()
+        if name and name not in complexes:
+            complexes[name] = {"password_hash": hash_password(initial_password), "created_at": now, "updated_at": now}
+            changed = True
+    if changed:
+        save_complexes(complexes)
+    return complexes
 
 # 한국 표준시(KST, UTC+9) 시간 반환 함수
 def get_kst_now():
     return datetime.datetime.now(timezone(timedelta(hours=9)))
 
 def get_gsheet_worksheet():
-    if not HAS_GSPREAD:
-        return None
-    if "gcp_service_account" in st.secrets and "spreadsheet_url" in st.secrets:
-        try:
-            scope = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"
-            ]
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
-            client = gspread.authorize(credentials)
-            sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
-            return sheet
-        except Exception as e:
-            st.error(f"⚠️ 구글 시트 연동 중 오류 발생: {e}")
-            return None
-    return None
+    spreadsheet = get_spreadsheet()
+    return spreadsheet.sheet1 if spreadsheet is not None else None
 
 def calculate_risk(scores):
     if not isinstance(scores, dict):
@@ -165,9 +285,6 @@ def save_data(data):
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
-            if not data:
-                return
-
             headers = ["id", "complex", "unit", "resident_name", "created_at", "risk_level", "scores", "dialogue_history", "ai_summary"]
             rows = [headers]
             
@@ -193,6 +310,7 @@ def save_data(data):
                     str(item.get("ai_summary", ""))
                 ])
             
+            sheet.clear()
             sheet.update(range_name='A1', values=rows)
         except Exception as e:
             st.error(f"구글 시트 동기화 저장 실패: {e}")
@@ -285,28 +403,13 @@ def create_pdf_report(case_info):
     buffer.seek(0)
     return buffer.getvalue()
     
-APP_PASSWORD = st.secrets.get("APP_PASSWORD", "1234")
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-    st.title("🔒 등촌7단지 통합 주거복지 관리 시스템 로그인")
-    st.caption("본 시스템은 관계자 전용 보안 시스템입니다. 관리자 비밀번호를 입력해 주세요.")
-    
-    with st.form("login_form", clear_on_submit=False):
-        pwd_input = st.text_input("🔑 로그인 비밀번호", type="password", help="기본 비밀번호는 1234 입니다.")
-        submit_btn = st.form_submit_button("🔓 시스템 로그인", type="primary", use_container_width=True)
-        
-        if submit_btn:
-            if pwd_input == APP_PASSWORD:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("❌ 비밀번호가 올바르지 않습니다. 다시 확인 후 입력해 주세요.")
-                
-    st.info("💡 비밀번호 변경은 Streamlit Secrets에서 `APP_PASSWORD = \"원하는비밀번호\"` 로 설정 가능합니다.")
-    st.stop()
+# ─────────────────────────────────────────────────────────────
+# 단지별 접근 인증
+# ─────────────────────────────────────────────────────────────
+if "complex_authenticated" not in st.session_state:
+    st.session_state.complex_authenticated = {}
+if "active_complex" not in st.session_state:
+    st.session_state.active_complex = None
 
 if "cases" not in st.session_state:
     loaded_cases = load_data()
@@ -335,23 +438,98 @@ if "cases" not in st.session_state:
         save_data(loaded_cases)
     st.session_state.cases = loaded_cases
 
-if st.session_state.cases:
-    if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in st.session_state.cases):
-        st.session_state.selected_case_id = st.session_state.cases[0].get("id")
+# 단지 목록 구성: 기존 데이터의 단지명도 자동 포함
+complexes = load_complexes()
+complexes = ensure_complexes_from_cases(complexes, st.session_state.cases)
+
+st.title("🏠 통합 주거복지 관리 & 위험도 진단 시스템")
+st.caption("단지를 선택한 뒤 해당 단지 비밀번호로 인증해야 상담 자료를 열람할 수 있습니다.")
+
+# 단지 선택 / 신규 단지 생성
+select_tab, create_tab = st.tabs(["🏢 단지 선택", "➕ 새 단지 추가"])
+with select_tab:
+    complex_names = list(complexes.keys())
+    if complex_names:
+        chosen_complex = st.selectbox("접속할 단지를 선택하세요", complex_names, key="complex_selector")
+        already_auth = st.session_state.complex_authenticated.get(chosen_complex, False)
+        if already_auth:
+            st.success(f"🔓 {chosen_complex} 인증 완료")
+            if st.button(f"{chosen_complex} 들어가기", type="primary", use_container_width=True):
+                st.session_state.active_complex = chosen_complex
+                st.rerun()
+        else:
+            with st.form("complex_login_form"):
+                complex_pwd = st.text_input(f"🔑 {chosen_complex} 비밀번호", type="password")
+                complex_login = st.form_submit_button("단지 로그인", type="primary", use_container_width=True)
+                if complex_login:
+                    if verify_password(complex_pwd, complexes[chosen_complex]["password_hash"]):
+                        st.session_state.complex_authenticated[chosen_complex] = True
+                        st.session_state.active_complex = chosen_complex
+                        st.rerun()
+                    else:
+                        st.error("❌ 단지 비밀번호가 올바르지 않습니다.")
+    else:
+        st.info("등록된 단지가 없습니다. 새 단지를 추가해 주세요.")
+
+with create_tab:
+    st.info("새 단지는 원하는 단지명과 비밀번호를 직접 설정할 수 있습니다.")
+    with st.form("create_complex_form", clear_on_submit=True):
+        new_complex_name = st.text_input("새 단지명", placeholder="예: 등촌11단지")
+        new_complex_pwd = st.text_input("단지 비밀번호", type="password")
+        new_complex_pwd2 = st.text_input("단지 비밀번호 확인", type="password")
+        create_admin_pwd = st.text_input("관리자 비밀번호 (단지 생성 승인)", type="password")
+        create_complex = st.form_submit_button("새 단지 만들기", type="primary", use_container_width=True)
+        if create_complex:
+            name = new_complex_name.strip()
+            if not name:
+                st.error("단지명을 입력해 주세요.")
+            elif name in complexes:
+                st.error("이미 등록된 단지명입니다.")
+            elif not hmac.compare_digest(str(create_admin_pwd), str(ADMIN_PASSWORD)):
+                st.error("관리자 비밀번호가 올바르지 않아 단지를 생성할 수 없습니다.")
+            elif len(new_complex_pwd) < 6:
+                st.error("단지 비밀번호는 최소 6자 이상으로 설정해 주세요.")
+            elif new_complex_pwd != new_complex_pwd2:
+                st.error("비밀번호 확인이 일치하지 않습니다.")
+            else:
+                complexes[name] = {
+                    "password_hash": hash_password(new_complex_pwd),
+                    "created_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
+                    "updated_at": get_kst_now().strftime("%Y-%m-%d %H:%M")
+                }
+                save_complexes(complexes)
+                st.session_state.complex_authenticated[name] = True
+                st.session_state.active_complex = name
+                st.success(f"{name} 단지가 생성되었습니다.")
+                st.rerun()
+
+active_complex = st.session_state.active_complex
+if not active_complex or not st.session_state.complex_authenticated.get(active_complex, False):
+    st.stop()
+
+# 여기부터는 인증한 단지의 자료만 사용
+complex_cases = [c for c in st.session_state.cases if c.get("complex") == active_complex]
+
+if complex_cases:
+    if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in complex_cases):
+        st.session_state.selected_case_id = complex_cases[0].get("id")
 
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 with st.sidebar:
     st.header("⚙️ 시스템 설정 & 관리")
-    st.write(f"👤 접속 상태: **인증 완료**")
+    st.write(f"🏢 접속 단지: **{active_complex}**")
+    st.write("👤 접속 상태: **단지 인증 완료**")
     
     if get_gsheet_worksheet() is not None:
         st.success("🟢 구글 시트 영구 저장 연동 중")
     else:
         st.info("🟡 로컬 파일 저장 모드 (구글 시트 미연동)")
 
-    if st.button("🚪 로그아웃", use_container_width=True):
-        st.session_state.authenticated = False
+    if st.button("🚪 단지 로그아웃", use_container_width=True):
+        st.session_state.complex_authenticated[active_complex] = False
+        st.session_state.active_complex = None
+        st.session_state.pop("selected_case_id", None)
         st.rerun()
     
     st.divider()
@@ -361,6 +539,30 @@ with st.sidebar:
     else:
         st.warning("⚠️ OpenAI API 키 미설정")
         OPENAI_API_KEY = st.text_input("OpenAI API Key 수동 입력", type="password")
+
+    st.divider()
+
+    with st.expander("🔐 현재 단지 비밀번호 변경"):
+        with st.form("change_complex_password_form", clear_on_submit=True):
+            old_pwd = st.text_input("현재 단지 비밀번호", type="password")
+            new_pwd = st.text_input("새 비밀번호 (6자 이상)", type="password")
+            new_pwd2 = st.text_input("새 비밀번호 확인", type="password")
+            change_pwd_submit = st.form_submit_button("비밀번호 변경", use_container_width=True)
+            if change_pwd_submit:
+                if not verify_password(old_pwd, complexes[active_complex]["password_hash"]):
+                    st.error("현재 단지 비밀번호가 올바르지 않습니다.")
+                elif len(new_pwd) < 6:
+                    st.error("새 비밀번호는 6자 이상으로 설정해 주세요.")
+                elif new_pwd != new_pwd2:
+                    st.error("새 비밀번호 확인이 일치하지 않습니다.")
+                else:
+                    complexes[active_complex]["password_hash"] = hash_password(new_pwd)
+                    complexes[active_complex]["updated_at"] = get_kst_now().strftime("%Y-%m-%d %H:%M")
+                    save_complexes(complexes)
+                    st.session_state.complex_authenticated[active_complex] = False
+                    st.session_state.active_complex = None
+                    st.success("비밀번호가 변경되었습니다. 새 비밀번호로 다시 로그인해 주세요.")
+                    st.rerun()
 
     st.divider()
     
@@ -375,7 +577,8 @@ with st.sidebar:
     
     st.subheader("➕ 신규 상담 세대 추가")
     with st.form("add_case_form", clear_on_submit=True):
-        new_complex = st.text_input("단지명", placeholder="예: 등촌7단지")
+        st.text_input("단지명", value=active_complex, disabled=True)
+        new_complex = active_complex
         new_unit = st.text_input("동/호수", placeholder="예: 701동 102호")
         new_name = st.text_input("입주민 성명", placeholder="예: 이OO 님")
         add_submit = st.form_submit_button("신규 등록", type="primary", use_container_width=True)
@@ -402,7 +605,7 @@ with st.sidebar:
             else:
                 st.error("단지명, 동/호수, 입주민 성명을 모두 입력해주세요.")
 
-filtered_cases = st.session_state.cases
+filtered_cases = [c for c in st.session_state.cases if c.get("complex") == active_complex]
 
 if risk_filter == "🔴 위험군만 보기":
     filtered_cases = [c for c in filtered_cases if c.get("risk_level") == "위험"]
@@ -419,21 +622,22 @@ if search_query:
         or search_query.lower() in c.get("resident_name", "").lower()
     ]
 
-st.title("🏠 등촌7단지 통합 주거복지 관리 & 위험도 진단 시스템")
+st.title(f"🏠 {active_complex} 통합 주거복지 관리 & 위험도 진단 시스템")
 st.caption("주택관리공단 현장 맞춤형: 계약, 부금, 시설, 민원 4대 영역 진단 및 구글 시트 실시간 자동 보존 체계")
 
 col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
 
-total_count = len(st.session_state.cases)
-red_count = sum(1 for c in st.session_state.cases if c.get("risk_level") == "위험")
-yellow_count = sum(1 for c in st.session_state.cases if c.get("risk_level") == "주의")
-green_count = sum(1 for c in st.session_state.cases if c.get("risk_level") == "관심")
+active_cases = [c for c in st.session_state.cases if c.get("complex") == active_complex]
+total_count = len(active_cases)
+red_count = sum(1 for c in active_cases if c.get("risk_level") == "위험")
+yellow_count = sum(1 for c in active_cases if c.get("risk_level") == "주의")
+green_count = sum(1 for c in active_cases if c.get("risk_level") == "관심")
 
 col_m1.metric("총 등록 세대", f"{total_count} 건")
 col_m2.metric("🔴 위험 (긴급 연계)", f"{red_count} 세대", delta=f"{red_count}건 관리중", delta_color="inverse")
 col_m3.metric("🟡 주의 (지속 관찰)", f"{yellow_count} 세대")
 col_m4.metric("🟢 관심 (일반 관리)", f"{green_count} 세대")
-col_m5.metric("📋 관리 대상 단지", "500+ 단지")
+col_m5.metric("📋 현재 단지", active_complex)
 
 st.divider()
 
@@ -450,7 +654,7 @@ selected_id = st.selectbox(
     index=0
 )
 
-current_case = next((c for c in st.session_state.cases if c.get("id") == selected_id), st.session_state.cases[0])
+current_case = next((c for c in active_cases if c.get("id") == selected_id), active_cases[0])
 
 tab1, tab2, tab3 = st.tabs([
     "📋 주거복지 대화 및 AI 요약", 
@@ -814,7 +1018,7 @@ with tab3:
     
     col_bak1, col_bak2 = st.columns(2)
     with col_bak1:
-        json_string = json.dumps(st.session_state.cases, ensure_ascii=False, indent=2)
+        json_string = json.dumps(active_cases, ensure_ascii=False, indent=2)
         st.download_button(
             label="📥 전체 데이터 백업 다운로드 (.json)",
             data=json_string,
@@ -829,7 +1033,10 @@ with tab3:
             try:
                 restored_data = json.load(uploaded_file)
                 if isinstance(restored_data, list):
-                    st.session_state.cases = [sanitize_case(item, i) for i, item in enumerate(restored_data)]
+                    restored = [sanitize_case(item, i) for i, item in enumerate(restored_data)]
+                    for item in restored:
+                        item["complex"] = active_complex
+                    st.session_state.cases = [c for c in st.session_state.cases if c.get("complex") != active_complex] + restored
                     save_data(st.session_state.cases)
                     st.success("🎉 데이터 복원이 성공적으로 완료되었습니다!")
                     st.rerun()
@@ -839,22 +1046,51 @@ with tab3:
     st.divider()
 
     st.markdown("#### 🗑️ 선택 세대 삭제")
-    col_del1, col_del2 = st.columns([3, 1])
-    with col_del1:
-        st.write(f"현재 선택된 세대: **[{current_case.get('id')}] {current_case.get('complex')} {current_case.get('unit')} - {current_case.get('resident_name')}**")
-    with col_del2:
-        if st.button("❌ 선택 세대 삭제", type="secondary", use_container_width=True):
-            st.session_state.cases = [c for c in st.session_state.cases if c.get("id") != current_case.get("id")]
-            save_data(st.session_state.cases)
-            st.success("해당 세대가 삭제되었습니다.")
+    st.write(f"현재 선택된 세대: **[{current_case.get('id')}] {current_case.get('complex')} {current_case.get('unit')} - {current_case.get('resident_name')}**")
+    st.warning("삭제 버튼만 눌러서는 삭제되지 않습니다. 관리자 비밀번호 확인 후 최종 삭제됩니다.")
+
+    if "delete_confirm_id" not in st.session_state:
+        st.session_state.delete_confirm_id = None
+
+    if st.session_state.delete_confirm_id != current_case.get("id"):
+        if st.button("❌ 삭제 요청", type="secondary", use_container_width=True):
+            st.session_state.delete_confirm_id = current_case.get("id")
             st.rerun()
+    else:
+        with st.form("admin_delete_form"):
+            st.error("⚠️ 최종 삭제 확인 단계입니다. 삭제 후 복구하려면 백업본이 필요합니다.")
+            delete_admin_pwd = st.text_input("🔐 관리자 비밀번호", type="password")
+            confirm_text = st.text_input("확인을 위해 '삭제'라고 입력하세요")
+            col_confirm, col_cancel = st.columns(2)
+            with col_confirm:
+                final_delete = st.form_submit_button("🗑️ 관리자 확인 후 최종 삭제", type="primary", use_container_width=True)
+            with col_cancel:
+                cancel_delete = st.form_submit_button("취소", use_container_width=True)
+
+            if cancel_delete:
+                st.session_state.delete_confirm_id = None
+                st.rerun()
+
+            if final_delete:
+                if not hmac.compare_digest(str(delete_admin_pwd), str(ADMIN_PASSWORD)):
+                    st.error("❌ 관리자 비밀번호가 올바르지 않습니다.")
+                elif confirm_text.strip() != "삭제":
+                    st.error("❌ 확인란에 '삭제'라고 정확히 입력해 주세요.")
+                else:
+                    delete_id = current_case.get("id")
+                    st.session_state.cases = [c for c in st.session_state.cases if c.get("id") != delete_id]
+                    save_data(st.session_state.cases)
+                    st.session_state.delete_confirm_id = None
+                    st.session_state.pop("selected_case_id", None)
+                    st.success("해당 세대가 삭제되었습니다.")
+                    st.rerun()
 
     st.divider()
     
     st.markdown("#### 📋 전체 세대 진단 요약 목록")
     
     summary_list = []
-    for c in st.session_state.cases:
+    for c in active_cases:
         sc = c.get("scores", {"contract": 0, "dues": 0, "facility": 0, "grievance": 0})
         summary_list.append({
             "ID": c.get("id", ""),
