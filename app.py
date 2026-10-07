@@ -94,7 +94,7 @@ def load_complexes():
                 ws = spreadsheet.worksheet("complexes")
             except gspread.WorksheetNotFound:
                 ws = spreadsheet.add_worksheet(title="complexes", rows=200, cols=5)
-                ws.update(range_name="A1", values=[["complex_name", "password_hash", "created_at", "updated_at"]])
+                ws.update(range_name="A1", values=[["complex_name", "password_hash", "created_at", "updated_at", "active"]])
             records = ws.get_all_records()
             data = {}
             for row in records:
@@ -104,7 +104,8 @@ def load_complexes():
                     data[name] = {
                         "password_hash": pwd_hash,
                         "created_at": str(row.get("created_at", "")),
-                        "updated_at": str(row.get("updated_at", ""))
+                        "updated_at": str(row.get("updated_at", "")),
+                        "active": str(row.get("active", "TRUE")).upper() not in ("FALSE", "0", "NO")
                     }
             if data:
                 return data
@@ -125,7 +126,8 @@ def load_complexes():
         "등촌7단지": {
             "password_hash": hash_password(initial_password),
             "created_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
-            "updated_at": get_kst_now().strftime("%Y-%m-%d %H:%M")
+            "updated_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
+            "active": True
         }
     }
     save_complexes(data)
@@ -146,9 +148,9 @@ def save_complexes(data):
                 ws = spreadsheet.worksheet("complexes")
             except gspread.WorksheetNotFound:
                 ws = spreadsheet.add_worksheet(title="complexes", rows=max(200, len(data)+20), cols=5)
-            rows = [["complex_name", "password_hash", "created_at", "updated_at"]]
+            rows = [["complex_name", "password_hash", "created_at", "updated_at", "active"]]
             for name, info in sorted(data.items()):
-                rows.append([name, info.get("password_hash", ""), info.get("created_at", ""), info.get("updated_at", "")])
+                rows.append([name, info.get("password_hash", ""), info.get("created_at", ""), info.get("updated_at", ""), "TRUE" if info.get("active", True) else "FALSE"])
             ws.clear()
             ws.update(range_name="A1", values=rows)
         except Exception as e:
@@ -161,7 +163,7 @@ def ensure_complexes_from_cases(complexes, cases):
     for case in cases:
         name = str(case.get("complex", "")).strip()
         if name and name not in complexes:
-            complexes[name] = {"password_hash": hash_password(initial_password), "created_at": now, "updated_at": now}
+            complexes[name] = {"password_hash": hash_password(initial_password), "created_at": now, "updated_at": now, "active": True}
             changed = True
     if changed:
         save_complexes(complexes)
@@ -446,9 +448,9 @@ st.title("🏠 통합 주거복지 관리 & 위험도 진단 시스템")
 st.caption("단지를 선택한 뒤 해당 단지 비밀번호로 인증해야 상담 자료를 열람할 수 있습니다.")
 
 # 단지 선택 / 신규 단지 생성
-select_tab, create_tab = st.tabs(["🏢 단지 선택", "➕ 새 단지 추가"])
+select_tab, create_tab, restore_tab = st.tabs(["🏢 단지 선택", "➕ 새 단지 추가", "♻️ 보관 단지 복구"])
 with select_tab:
-    complex_names = list(complexes.keys())
+    complex_names = sorted([name for name, info in complexes.items() if info.get("active", True)])
     if complex_names:
         chosen_complex = st.selectbox("접속할 단지를 선택하세요", complex_names, key="complex_selector")
         already_auth = st.session_state.complex_authenticated.get(chosen_complex, False)
@@ -495,7 +497,8 @@ with create_tab:
                 complexes[name] = {
                     "password_hash": hash_password(new_complex_pwd),
                     "created_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
-                    "updated_at": get_kst_now().strftime("%Y-%m-%d %H:%M")
+                    "updated_at": get_kst_now().strftime("%Y-%m-%d %H:%M"),
+                    "active": True
                 }
                 save_complexes(complexes)
                 st.session_state.complex_authenticated[name] = True
@@ -503,12 +506,35 @@ with create_tab:
                 st.success(f"{name} 단지가 생성되었습니다.")
                 st.rerun()
 
+with restore_tab:
+    archived_names = sorted([name for name, info in complexes.items() if not info.get("active", True)])
+    if not archived_names:
+        st.info("현재 보관(사용중지)된 단지가 없습니다.")
+    else:
+        with st.form("restore_complex_form"):
+            restore_name = st.selectbox("복구할 단지", archived_names)
+            restore_admin_pwd = st.text_input("🔐 관리자 비밀번호", type="password")
+            restore_submit = st.form_submit_button("♻️ 단지 다시 사용", type="primary", use_container_width=True)
+            if restore_submit:
+                if not hmac.compare_digest(str(restore_admin_pwd), str(ADMIN_PASSWORD)):
+                    st.error("❌ 관리자 비밀번호가 올바르지 않습니다.")
+                else:
+                    complexes[restore_name]["active"] = True
+                    complexes[restore_name]["updated_at"] = get_kst_now().strftime("%Y-%m-%d %H:%M")
+                    save_complexes(complexes)
+                    st.success(f"{restore_name} 단지가 다시 활성화되었습니다.")
+                    st.rerun()
+
 active_complex = st.session_state.active_complex
 if not active_complex or not st.session_state.complex_authenticated.get(active_complex, False):
     st.stop()
 
 # 여기부터는 인증한 단지의 자료만 사용
 complex_cases = [c for c in st.session_state.cases if c.get("complex") == active_complex]
+
+# 관리자용 단지 삭제/보관 상태
+if "complex_delete_requested" not in st.session_state:
+    st.session_state.complex_delete_requested = False
 
 if complex_cases:
     if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in complex_cases):
@@ -541,6 +567,58 @@ with st.sidebar:
         OPENAI_API_KEY = st.text_input("OpenAI API Key 수동 입력", type="password")
 
     st.divider()
+
+    with st.expander("🗑️ 관리자용 단지 삭제 / 보관"):
+        st.warning("단지 삭제는 관리자 전용 기능입니다. 실수 방지를 위해 관리자 비밀번호와 단지명을 다시 확인합니다.")
+        delete_mode = st.radio(
+            "처리 방법",
+            ["단지만 사용중지 (세대자료 보존)", "단지 + 모든 세대자료 완전삭제"],
+            key="complex_delete_mode"
+        )
+        if not st.session_state.complex_delete_requested:
+            if st.button("⚠️ 단지 삭제 절차 시작", use_container_width=True):
+                st.session_state.complex_delete_requested = True
+                st.rerun()
+        else:
+            with st.form("complex_delete_admin_form"):
+                st.error(f"현재 대상: {active_complex}")
+                complex_admin_pwd = st.text_input("🔐 관리자 비밀번호", type="password")
+                complex_name_confirm = st.text_input(f"확인을 위해 단지명 '{active_complex}'을 정확히 입력하세요")
+                final_complex_delete = st.form_submit_button("🗑️ 최종 처리", type="primary", use_container_width=True)
+                cancel_complex_delete = st.form_submit_button("취소", use_container_width=True)
+
+                if cancel_complex_delete:
+                    st.session_state.complex_delete_requested = False
+                    st.rerun()
+
+                if final_complex_delete:
+                    if not hmac.compare_digest(str(complex_admin_pwd), str(ADMIN_PASSWORD)):
+                        st.error("❌ 관리자 비밀번호가 올바르지 않습니다.")
+                    elif complex_name_confirm.strip() != active_complex:
+                        st.error("❌ 단지명이 일치하지 않습니다.")
+                    elif delete_mode == "단지만 사용중지 (세대자료 보존)":
+                        # 세대자료는 그대로 두고 단지만 비활성화하여 로그인 목록에서 제외
+                        complexes[active_complex]["active"] = False
+                        complexes[active_complex]["updated_at"] = get_kst_now().strftime("%Y-%m-%d %H:%M")
+                        save_complexes(complexes)
+                        st.session_state.complex_authenticated[active_complex] = False
+                        st.session_state.active_complex = None
+                        st.session_state.complex_delete_requested = False
+                        st.success("단지를 사용중지 처리했습니다. 세대자료는 보존됩니다.")
+                        st.rerun()
+                    else:
+                        # 단지 설정과 해당 단지의 모든 세대자료를 함께 영구 삭제
+                        target = active_complex
+                        st.session_state.cases = [c for c in st.session_state.cases if c.get("complex") != target]
+                        save_data(st.session_state.cases)
+                        complexes.pop(target, None)
+                        save_complexes(complexes)
+                        st.session_state.complex_authenticated.pop(target, None)
+                        st.session_state.active_complex = None
+                        st.session_state.complex_delete_requested = False
+                        st.session_state.pop("selected_case_id", None)
+                        st.success("단지 설정과 해당 단지의 모든 세대자료가 삭제되었습니다.")
+                        st.rerun()
 
     with st.expander("🔐 현재 단지 비밀번호 변경"):
         with st.form("change_complex_password_form", clear_on_submit=True):
