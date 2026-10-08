@@ -36,7 +36,10 @@ DATA_FILE = "cases_data.json"
 COMPLEX_FILE = "complexes_data.json"
 
 # 관리자 비밀번호: Streamlit Secrets에서 ADMIN_PASSWORD로 설정하세요.
-ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", st.secrets.get("APP_PASSWORD", "1234"))
+ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "")
+if not ADMIN_PASSWORD:
+    st.error("Streamlit Secrets에 ADMIN_PASSWORD를 설정해야 합니다.")
+    st.stop()
 
 def hash_password(password):
     """PBKDF2-HMAC-SHA256 + 랜덤 salt로 단지 비밀번호를 안전하게 저장."""
@@ -58,6 +61,7 @@ def verify_password(password, stored_hash):
     except Exception:
         return False
 
+@st.cache_resource(show_spinner=False)
 def get_gspread_client():
     if not HAS_GSPREAD:
         return None
@@ -75,6 +79,7 @@ def get_gspread_client():
         st.error(f"⚠️ 구글 시트 인증 중 오류 발생: {e}")
         return None
 
+@st.cache_resource(show_spinner=False)
 def get_spreadsheet():
     client = get_gspread_client()
     if client is None:
@@ -85,6 +90,7 @@ def get_spreadsheet():
         st.error(f"⚠️ 구글 스프레드시트 연결 오류: {e}")
         return None
 
+@st.cache_data(ttl=45, show_spinner=False)
 def load_complexes():
     """단지 설정은 Google Sheets의 complexes 워크시트를 우선 사용하고 JSON은 비상 백업으로 사용."""
     spreadsheet = get_spreadsheet()
@@ -107,8 +113,7 @@ def load_complexes():
                         "updated_at": str(row.get("updated_at", "")),
                         "active": str(row.get("active", "TRUE")).upper() not in ("FALSE", "0", "NO")
                     }
-            if data:
-                return data
+            return data
         except Exception as e:
             st.warning(f"단지 설정 시트 읽기 지연: {e}")
 
@@ -135,6 +140,7 @@ def load_complexes():
 
 def save_complexes(data):
     """단지 설정을 로컬 백업 + Google Sheets complexes 워크시트에 저장."""
+    load_complexes.clear()
     try:
         with open(COMPLEX_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -151,8 +157,9 @@ def save_complexes(data):
             rows = [["complex_name", "password_hash", "created_at", "updated_at", "active"]]
             for name, info in sorted(data.items()):
                 rows.append([name, info.get("password_hash", ""), info.get("created_at", ""), info.get("updated_at", ""), "TRUE" if info.get("active", True) else "FALSE"])
-            ws.clear()
             ws.update(range_name="A1", values=rows)
+            if ws.row_count > len(rows):
+                ws.batch_clear([f"A{len(rows)+1}:E{ws.row_count}"])
         except Exception as e:
             st.error(f"단지 설정 Google Sheets 저장 실패: {e}")
 
@@ -173,6 +180,7 @@ def ensure_complexes_from_cases(complexes, cases):
 def get_kst_now():
     return datetime.datetime.now(timezone(timedelta(hours=9)))
 
+@st.cache_resource(show_spinner=False)
 def get_gsheet_worksheet():
     spreadsheet = get_spreadsheet()
     return spreadsheet.sheet1 if spreadsheet is not None else None
@@ -215,11 +223,8 @@ def sanitize_case(c, index=0):
         c["attachments"] = []
     return c
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_data():
-    # 세션 데이터 우선 반환 (구글 시트 429 읽기 요청 초과 방지)
-    if "cases" in st.session_state and st.session_state.cases:
-        return st.session_state.cases
-
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
@@ -260,6 +265,7 @@ def load_data():
                     }
                     cases.append(sanitize_case(c, idx))
                 return cases
+            return []
         except Exception as e:
             if "cases" in st.session_state and st.session_state.cases:
                 return st.session_state.cases
@@ -275,47 +281,68 @@ def load_data():
             return []
     return []
 
-def save_data(data):
-    # 1. 로컬 JSON 파일 저장
+CASE_HEADERS = ["id", "complex", "unit", "resident_name", "created_at", "risk_level", "scores", "dialogue_history", "ai_summary"]
+
+
+def case_to_sheet_row(item):
+    """Keep large media out of Sheets (same policy as the original app)."""
+    clean_dialogue = []
+    for msg in item.get("dialogue_history", []):
+        msg_copy = dict(msg)
+        media = msg_copy.get("media_data")
+        if msg_copy.get("media_type") == "video" and media:
+            msg_copy["media_data"] = "[🎥 동영상 첨부 완료]"
+        elif msg_copy.get("media_type") == "image" and media and len(str(media)) > 30000:
+            msg_copy["media_data"] = "[📷 이미지 첨부 완료]"
+        clean_dialogue.append(msg_copy)
+    return [str(item.get("id", "")), str(item.get("complex", "")),
+            str(item.get("unit", "")), str(item.get("resident_name", "")),
+            str(item.get("created_at", "")), str(item.get("risk_level", "")),
+            json.dumps(item.get("scores", {}), ensure_ascii=False),
+            json.dumps(clean_dialogue, ensure_ascii=False), str(item.get("ai_summary", ""))]
+
+
+def save_data(data, changed_id=None):
+    """Update a single case in place when possible; use full sync for deletion/restore.
+
+    Existing Sheet rows are looked up by stable case ID, not by a cached row number.
+    Full rewrites remain for destructive operations and need a single-writer migration
+    before large-scale multi-office use.
+    """
+    sheet = get_gsheet_worksheet()
+    if sheet is not None:
+        try:
+            if changed_id is not None:
+                item = next((c for c in data if str(c.get("id")) == str(changed_id)), None)
+                if item is None:
+                    raise ValueError("수정 대상 세대를 찾을 수 없습니다.")
+                # Only column A is fetched to locate a stable ID, avoiding a full-sheet read.
+                ids = sheet.col_values(1)
+                if ids and ids[0] != "id":
+                    raise ValueError("시트의 첫 번째 열이 id가 아닙니다. 저장을 중단합니다.")
+                matches = [i + 1 for i, value in enumerate(ids) if i > 0 and value == str(changed_id)]
+                if len(matches) > 1:
+                    raise ValueError("중복 세대 ID가 발견되어 저장을 중단합니다.")
+                target_row = matches[0] if matches else max(2, len(ids) + 1)
+                if not ids:
+                    sheet.update(range_name="A1:I1", values=[CASE_HEADERS])
+                sheet.update(range_name=f"A{target_row}:I{target_row}", values=[case_to_sheet_row(item)])
+            else:
+                rows = [CASE_HEADERS] + [case_to_sheet_row(item) for item in data]
+                sheet.update(range_name=f"A1:I{len(rows)}", values=rows)
+                if sheet.row_count > len(rows):
+                    sheet.batch_clear([f"A{len(rows)+1}:I{sheet.row_count}"])
+        except Exception as e:
+            st.error(f"구글 시트 저장 실패: {e}")
+            return False
+    # Local JSON is a best-effort backup, not the authoritative shared database.
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        st.error(f"로컬 파일 저장 실패: {e}")
-
-    # 2. 구글 시트 안전 동기화 (전체 삭제 방식 제거 및 유실 차단)
-    sheet = get_gsheet_worksheet()
-    if sheet is not None:
-        try:
-            headers = ["id", "complex", "unit", "resident_name", "created_at", "risk_level", "scores", "dialogue_history", "ai_summary"]
-            rows = [headers]
-            
-            for item in data:
-                clean_dialogue = []
-                for msg in item.get("dialogue_history", []):
-                    msg_copy = dict(msg)
-                    if msg_copy.get("media_type") == "video" and msg_copy.get("media_data"):
-                        msg_copy["media_data"] = "[🎥 동영상 첨부 완료]"
-                    elif msg_copy.get("media_type") == "image" and msg_copy.get("media_data") and len(str(msg_copy.get("media_data"))) > 30000:
-                        msg_copy["media_data"] = "[📷 이미지 첨부 완료]"
-                    clean_dialogue.append(msg_copy)
-
-                rows.append([
-                    str(item.get("id", "")),
-                    str(item.get("complex", "")),
-                    str(item.get("unit", "")),
-                    str(item.get("resident_name", "")),
-                    str(item.get("created_at", "")),
-                    str(item.get("risk_level", "")),
-                    json.dumps(item.get("scores", {}), ensure_ascii=False),
-                    json.dumps(clean_dialogue, ensure_ascii=False),
-                    str(item.get("ai_summary", ""))
-                ])
-            
-            sheet.clear()
-            sheet.update(range_name='A1', values=rows)
-        except Exception as e:
-            st.error(f"구글 시트 동기화 저장 실패: {e}")
+        st.warning(f"로컬 백업 저장 실패: {e}")
+    load_data.clear()
+    return True
 
 def create_pdf_report(case_info):
     """나눔고딕 지원 한글 PDF 보고서(현장 이미지 포함)를 생성하는 함수"""
@@ -415,7 +442,7 @@ if "active_complex" not in st.session_state:
 
 if "cases" not in st.session_state:
     loaded_cases = load_data()
-    if not loaded_cases:
+    if not loaded_cases and get_gsheet_worksheet() is None and not os.path.exists(DATA_FILE):
         loaded_cases = [
             {
                 "id": "CASE-2026-001",
@@ -526,7 +553,8 @@ with restore_tab:
                     st.rerun()
 
 active_complex = st.session_state.active_complex
-if not active_complex or not st.session_state.complex_authenticated.get(active_complex, False):
+if (not active_complex or not st.session_state.complex_authenticated.get(active_complex, False)
+        or not complexes.get(active_complex, {}).get("active", False)):
     st.stop()
 
 # 여기부터는 인증한 단지의 자료만 사용
@@ -677,7 +705,10 @@ with st.sidebar:
                 }
                 st.session_state.cases.insert(0, new_record)
                 st.session_state.selected_case_id = new_id
-                save_data(st.session_state.cases)
+                if not save_data(st.session_state.cases, changed_id=new_id):
+                    st.session_state.cases = [c for c in st.session_state.cases if c.get("id") != new_id]
+                    st.error("저장에 실패했습니다. 세대 등록을 취소했습니다.")
+                    st.stop()
                 st.success("신규 세대가 추가되었습니다!")
                 st.rerun()
             else:
@@ -748,7 +779,7 @@ with tab1:
     with col_chat:
         st.write("##### 💬 현장 대화 및 사진/동영상 기록")
         
-        auto_sync = st.toggle("🔴 실시간 자동 갱신 (15초 주기)", value=False, help="다자간 동시 접속 시 다른 사용자의 입력값을 15초마다 자동 불러옵니다.")
+        auto_sync = st.toggle("🔄 자동 갱신 (60초 주기)", value=False, help="자동 갱신 시 60초마다 Google Sheets에서 변경된 기록을 조회합니다.")
         
         with st.form("chat_input_form", clear_on_submit=True):
             speaker = st.text_input("발화자 (직접 입력)", placeholder="예: 주거복지사, 관리소장, 입주민, 지자체 담당자 등")
@@ -798,7 +829,10 @@ with tab1:
                     "media_data": media_data
                 }
                 current_case["dialogue_history"].append(new_msg)
-                save_data(st.session_state.cases)
+                if not save_data(st.session_state.cases, changed_id=current_case["id"]):
+                    current_case["dialogue_history"].pop()
+                    st.error("저장에 실패했습니다. 다시 시도해 주세요.")
+                    st.stop()
                 st.success("대화 기록 및 미디어 첨부가 성공적으로 추가 및 구글 시트에 저장되었습니다.")
                 st.rerun()
 
@@ -840,10 +874,11 @@ with tab1:
                     st.divider()
 
         if auto_sync:
-            @st.fragment(run_every=15)
+            @st.fragment(run_every=60)
             def live_chat_area():
-                st.session_state.cases = load_data()
-                fresh_case = next((c for c in st.session_state.cases if c.get("id") == selected_id), current_case)
+                load_data.clear()
+                fresh_cases = load_data()
+                fresh_case = next((c for c in fresh_cases if c.get("id") == selected_id and c.get("complex") == active_complex), current_case)
                 display_messages(fresh_case)
             live_chat_area()
         else:
@@ -917,16 +952,20 @@ with tab1:
                         
                         summary_result = response.choices[0].message.content
                         current_case["ai_summary"] = summary_result
-                        save_data(st.session_state.cases)
+                        save_data(st.session_state.cases, changed_id=current_case["id"])
                         st.success("AI 보고서 요약 및 위기별 상세 기관/연락처/사이트 연계 안 작성이 완료되었습니다!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
 
-        edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=320)
-        if edited_summary != current_case.get("ai_summary", ""):
+        with st.form(key=f"summary_edit_{current_case['id']}"):
+            edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=320)
+            save_summary = st.form_submit_button("💾 수정한 요약문 저장")
+        if save_summary and edited_summary != current_case.get("ai_summary", ""):
             current_case["ai_summary"] = edited_summary
-            save_data(st.session_state.cases)
+            if save_data(st.session_state.cases, changed_id=current_case["id"]):
+                st.success("요약문이 저장되었습니다.")
+                st.rerun()
 
         image_attachments = [
             msg.get("media_data") for msg in current_case.get("dialogue_history", [])
@@ -968,17 +1007,23 @@ with tab1:
             )
 
         with col_exp2:
-            try:
-                pdf_bytes = create_pdf_report(current_case)
+            # PDF image decoding and ReportLab work are deferred until requested.
+            pdf_fingerprint = hashlib.sha256(json.dumps(current_case, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+            pdf_key = f"pdf_{current_case['id']}_{pdf_fingerprint}"
+            if st.button("📕 PDF 보고서 생성", key=f"prepare_{current_case['id']}", use_container_width=True):
+                try:
+                    st.session_state[pdf_key] = create_pdf_report(current_case)
+                except Exception as e:
+                    st.error(f"PDF 생성 오류: {e}")
+            if pdf_key in st.session_state:
                 st.download_button(
-                    label="📕 PDF 보고서 저장",
-                    data=pdf_bytes,
+                    label="📥 생성된 PDF 다운로드",
+                    data=st.session_state[pdf_key],
                     file_name=f"상담보고서_{current_case.get('id')}.pdf",
                     mime="application/pdf",
-                    use_container_width=True
+                    use_container_width=True,
+                    on_click="ignore"
                 )
-            except Exception as e:
-                st.error(f"PDF 생성 오류: {e}")
 
 with tab2:
     st.subheader("📊 주택관리공단 맞춤 4대 영역 체크리스트 & 진단")
@@ -1027,7 +1072,7 @@ with tab2:
         if st.button("💾 체크리스트 점수 및 위험도 진단 저장", type="primary", use_container_width=True):
             current_case["scores"] = updated_scores
             current_case["risk_level"] = calculate_risk(updated_scores)
-            save_data(st.session_state.cases)
+            save_data(st.session_state.cases, changed_id=current_case["id"])
             st.success(f"진단 결과 저장 완료! 위험도: [{current_case['risk_level']}]")
             st.rerun()
 
@@ -1107,8 +1152,9 @@ with tab3:
     
     with col_bak2:
         uploaded_file = st.file_uploader("📤 백업 파일(.json) 선택하여 복원", type=["json"])
-        if uploaded_file is not None:
+        if uploaded_file is not None and st.button("선택한 백업 파일 복원 실행", type="primary"):
             try:
+                uploaded_file.seek(0)
                 restored_data = json.load(uploaded_file)
                 if isinstance(restored_data, list):
                     restored = [sanitize_case(item, i) for i, item in enumerate(restored_data)]
