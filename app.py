@@ -240,30 +240,50 @@ def db_enabled():
     return False
 
 def media_storage_enabled():
-    return get_drive_service() is not None
+    try:
+        return get_drive_service() is not None
+    except Exception:
+        return False
 
 @st.cache_resource(show_spinner=False)
 def get_drive_service():
-    """무료 개인 Drive는 사용자 OAuth 갱신 토큰을 사용해야 함. 서비스 계정은 공유 드라이브에만 권장."""
-    try:
-        oauth = st.secrets.get("drive_oauth", {})
-        if oauth and all(oauth.get(k) for k in ("client_id", "client_secret", "refresh_token")):
+    """Google Drive OAuth 연결. 설정 누락과 인증 실패를 구분하여 안내합니다."""
+    oauth = st.secrets.get("drive_oauth", None)
+    if oauth is not None:
+        missing = [k for k in ("client_id", "client_secret", "refresh_token") if not oauth.get(k)]
+        if missing:
+            raise RuntimeError("Streamlit Secrets [drive_oauth]에 누락된 항목: " + ", ".join(missing))
+        try:
             creds = UserCredentials(
-                token=None, refresh_token=oauth["refresh_token"],
-                client_id=oauth["client_id"], client_secret=oauth["client_secret"],
+                token=None,
+                refresh_token=str(oauth["refresh_token"]).strip(),
+                client_id=str(oauth["client_id"]).strip(),
+                client_secret=str(oauth["client_secret"]).strip(),
                 token_uri="https://oauth2.googleapis.com/token",
-                scopes=["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
+                scopes=["https://www.googleapis.com/auth/drive"],
             )
             creds.refresh(Request())
             return build("drive", "v3", credentials=creds, cache_discovery=False)
-        if st.secrets.get("DRIVE_SHARED_FOLDER_ID") and "gcp_service_account" in st.secrets:
+        except Exception as exc:
+            # 원본 오류 메시지에 토큰이 포함될 수 있으므로 사용자 화면에는 예외 종류만 표시.
+            raise RuntimeError(
+                f"Google Drive OAuth 연결 실패 ({type(exc).__name__}). "
+                "토큰 만료/취소, OAuth 클라이언트 불일치, Drive API 활성화, "
+                "Google Cloud OAuth 게시 상태를 확인하세요."
+            ) from exc
+    if st.secrets.get("DRIVE_SHARED_FOLDER_ID") and "gcp_service_account" in st.secrets:
+        try:
             creds = Credentials.from_service_account_info(
                 dict(st.secrets["gcp_service_account"]),
-                scopes=["https://www.googleapis.com/auth/drive"])
+                scopes=["https://www.googleapis.com/auth/drive"],
+            )
             return build("drive", "v3", credentials=creds, cache_discovery=False)
-    except Exception:
-        return None
-    return None
+        except Exception as exc:
+            raise RuntimeError(f"공유 드라이브 서비스 계정 연결 실패 ({type(exc).__name__}).") from exc
+    raise RuntimeError(
+        "Streamlit Secrets에 [drive_oauth] 설정이 없습니다. "
+        "앱의 Settings > Secrets에 client_id, client_secret, refresh_token을 입력하세요."
+    )
 
 def _drive_folder():
     folder = str(st.secrets.get("DRIVE_FOLDER_ID", st.secrets.get("DRIVE_SHARED_FOLDER_ID", ""))).strip()
@@ -273,8 +293,6 @@ def _drive_folder():
 
 def save_media_file(file_obj, complex_name, case_id):
     service = get_drive_service()
-    if service is None:
-        raise ValueError("Google Drive 인증이 설정되지 않았습니다. 설치 안내서의 drive_oauth 설정을 확인하세요.")
     mime = (file_obj.type or mimetypes.guess_type(file_obj.name)[0] or "").lower()
     is_image = mime in {"image/jpeg", "image/png", "image/webp"}
     is_video = mime in {"video/mp4", "video/quicktime", "video/x-msvideo"}
@@ -336,8 +354,6 @@ def read_legacy_sheet_media(token, complex_name, case_id):
 @st.cache_data(ttl=180, show_spinner=False, max_entries=6)
 def read_drive_media(file_id, complex_name, case_id):
     service = get_drive_service()
-    if service is None:
-        raise ValueError("Google Drive 인증이 필요합니다.")
     meta = service.files().get(fileId=file_id, fields="id,size,mimeType,appProperties,parents", supportsAllDrives=True).execute()
     props = meta.get("appProperties", {})
     if props.get("complex") != str(complex_name) or props.get("case_id") != str(case_id):
