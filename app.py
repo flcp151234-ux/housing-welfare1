@@ -7,6 +7,13 @@ import hmac
 from datetime import timezone, timedelta
 import base64
 import io
+import uuid
+import mimetypes
+import tempfile
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from google.oauth2.credentials import Credentials as UserCredentials
+from google.auth.transport.requests import Request
 from PIL import Image
 import plotly.graph_objects as go
 import pandas as pd
@@ -223,8 +230,168 @@ def sanitize_case(c, index=0):
         c["attachments"] = []
     return c
 
+
+# 첨부파일: 기존 sheetmedia 데이터는 읽기 전용으로 호환, 신규 업로드는 Drive 원본 보존.
+IMAGE_LIMIT = 20 * 1024 * 1024
+VIDEO_LIMIT = 200 * 1024 * 1024
+MEDIA_CHUNK_SIZE = 24000
+
+def db_enabled():
+    return False
+
+def media_storage_enabled():
+    return get_drive_service() is not None
+
+@st.cache_resource(show_spinner=False)
+def get_drive_service():
+    """무료 개인 Drive는 사용자 OAuth 갱신 토큰을 사용해야 함. 서비스 계정은 공유 드라이브에만 권장."""
+    try:
+        oauth = st.secrets.get("drive_oauth", {})
+        if oauth and all(oauth.get(k) for k in ("client_id", "client_secret", "refresh_token")):
+            creds = UserCredentials(
+                token=None, refresh_token=oauth["refresh_token"],
+                client_id=oauth["client_id"], client_secret=oauth["client_secret"],
+                token_uri="https://oauth2.googleapis.com/token",
+                scopes=["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
+            )
+            creds.refresh(Request())
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
+        if st.secrets.get("DRIVE_SHARED_FOLDER_ID") and "gcp_service_account" in st.secrets:
+            creds = Credentials.from_service_account_info(
+                dict(st.secrets["gcp_service_account"]),
+                scopes=["https://www.googleapis.com/auth/drive"])
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
+    except Exception:
+        return None
+    return None
+
+def _drive_folder():
+    folder = str(st.secrets.get("DRIVE_FOLDER_ID", st.secrets.get("DRIVE_SHARED_FOLDER_ID", ""))).strip()
+    if not folder:
+        raise ValueError("Secrets에 DRIVE_FOLDER_ID를 설정해야 합니다.")
+    return folder
+
+def save_media_file(file_obj, complex_name, case_id):
+    service = get_drive_service()
+    if service is None:
+        raise ValueError("Google Drive 인증이 설정되지 않았습니다. 설치 안내서의 drive_oauth 설정을 확인하세요.")
+    mime = (file_obj.type or mimetypes.guess_type(file_obj.name)[0] or "").lower()
+    is_image = mime in {"image/jpeg", "image/png", "image/webp"}
+    is_video = mime in {"video/mp4", "video/quicktime", "video/x-msvideo"}
+    if not (is_image or is_video):
+        raise ValueError("JPG, PNG, WEBP, MP4, MOV, AVI만 지원합니다.")
+    size = file_obj.size
+    limit = IMAGE_LIMIT if is_image else VIDEO_LIMIT
+    if size > limit:
+        raise ValueError(f"업로드 제한 초과: 사진 20MB / 동영상 200MB (현재 {size / 1024**2:.1f}MB)")
+    # SpooledTemporaryFile을 이용하여 전체 파일의 base64 복제를 피합니다.
+    with tempfile.NamedTemporaryFile(suffix="_upload", delete=True) as temp:
+        file_obj.seek(0)
+        while True:
+            chunk = file_obj.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            temp.write(chunk)
+        temp.flush()
+        safe_name = os.path.basename(file_obj.name).replace("/", "_")[:120]
+        metadata = {
+            "name": f"{uuid.uuid4().hex}_{safe_name}",
+            "parents": [_drive_folder()],
+            "appProperties": {"complex": str(complex_name), "case_id": str(case_id)}
+        }
+        media = MediaFileUpload(temp.name, mimetype=mime, resumable=True, chunksize=8 * 1024 * 1024)
+        request = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True)
+        result = None
+        while result is None:
+            _, result = request.next_chunk(num_retries=3)
+    return "drivefile:" + result["id"]
+
+@st.cache_resource(show_spinner=False)
+def get_media_sheet():
+    book = get_spreadsheet()
+    if book is None:
+        return None
+    try:
+        return book.worksheet("media_chunks")
+    except gspread.WorksheetNotFound:
+        return None
+
+@st.cache_data(ttl=300, show_spinner=False, max_entries=16)
+def read_legacy_sheet_media(token, complex_name, case_id):
+    ws = get_media_sheet()
+    if ws is None:
+        raise ValueError("이전 첨부파일 저장 시트를 찾을 수 없습니다.")
+    ids = ws.col_values(1)
+    rows = [i + 1 for i, x in enumerate(ids) if i > 0 and x == token]
+    if not rows:
+        raise ValueError("첨부파일을 찾을 수 없습니다.")
+    parts = []
+    for rownum in rows:
+        values = ws.row_values(rownum)
+        if len(values) < 6 or values[1] != complex_name or values[2] != case_id:
+            raise PermissionError("현재 상담 건의 첨부파일이 아닙니다.")
+        parts.append((int(values[4]), values[5]))
+    return base64.b64decode("".join(v for _, v in sorted(parts)))
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=6)
+def read_drive_media(file_id, complex_name, case_id):
+    service = get_drive_service()
+    if service is None:
+        raise ValueError("Google Drive 인증이 필요합니다.")
+    meta = service.files().get(fileId=file_id, fields="id,size,mimeType,appProperties,parents", supportsAllDrives=True).execute()
+    props = meta.get("appProperties", {})
+    if props.get("complex") != str(complex_name) or props.get("case_id") != str(case_id):
+        raise PermissionError("다른 단지 또는 상담 건의 파일입니다.")
+    if _drive_folder() not in meta.get("parents", []):
+        raise PermissionError("설정된 보관 폴더 밖의 파일입니다.")
+    if int(meta.get("size", 0)) > VIDEO_LIMIT:
+        raise ValueError("허용된 최대 파일 크기를 초과합니다.")
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    output = io.BytesIO()
+    downloader = MediaIoBaseDownload(output, request, chunksize=4 * 1024 * 1024)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk(num_retries=3)
+    return output.getvalue()
+
+def resolve_media(data, complex_name=None, case_id=None):
+    if isinstance(data, str) and data.startswith("drivefile:"):
+        return read_drive_media(data[len("drivefile:"):], complex_name, case_id)
+    if isinstance(data, str) and data.startswith("sheetmedia:"):
+        return read_legacy_sheet_media(data[len("sheetmedia:"):], complex_name, case_id)
+    return data
+
+def display_saved_media(data, kind, complex_name, case_id, key):
+    """대용량 파일은 사용자가 열기를 선택한 경우에만 Drive에서 읽음."""
+    if isinstance(data, str) and data.startswith(("drivefile:", "sheetmedia:")):
+        with st.expander("📷 사진 보기" if kind == "image" else "🎥 동영상 재생 / 다운로드", expanded=False):
+            if st.button("원본 불러오기", key=f"load_{key}"):
+                st.session_state[f"opened_{key}"] = True
+            if st.session_state.get(f"opened_{key}"):
+                try:
+                    payload = resolve_media(data, complex_name, case_id)
+                    if kind == "image":
+                        st.image(payload, use_container_width=True)
+                    else:
+                        st.video(payload)
+                    st.download_button("원본 다운로드", data=payload,
+                                       file_name=f"현장첨부_{case_id}_{key}.{'jpg' if kind == 'image' else 'mp4'}",
+                                       key=f"download_{key}")
+                except Exception as exc:
+                    st.error(f"첨부파일을 열 수 없습니다: {exc}")
+    elif kind == "image":
+        try:
+            st.image(data, use_container_width=True)
+        except Exception:
+            st.caption("이전 사진 형식은 미리보기를 지원하지 않습니다.")
+    elif kind == "video":
+        try:
+            st.video(data)
+        except Exception:
+            st.caption("이전 동영상 형식은 미리보기를 지원하지 않습니다.")
+
 @st.cache_data(ttl=30, show_spinner=False)
-def load_data():
+def load_data(complex_name=None):
     sheet = get_gsheet_worksheet()
     if sheet is not None:
         try:
@@ -290,9 +457,9 @@ def case_to_sheet_row(item):
     for msg in item.get("dialogue_history", []):
         msg_copy = dict(msg)
         media = msg_copy.get("media_data")
-        if msg_copy.get("media_type") == "video" and media:
+        if msg_copy.get("media_type") == "video" and media and not str(media).startswith(("sheetmedia:", "drivefile:")):
             msg_copy["media_data"] = "[🎥 동영상 첨부 완료]"
-        elif msg_copy.get("media_type") == "image" and media and len(str(media)) > 30000:
+        elif msg_copy.get("media_type") == "image" and media and len(str(media)) > 30000 and not str(media).startswith(("sheetmedia:", "drivefile:")):
             msg_copy["media_data"] = "[📷 이미지 첨부 완료]"
         clean_dialogue.append(msg_copy)
     return [str(item.get("id", "")), str(item.get("complex", "")),
@@ -324,14 +491,20 @@ def save_data(data, changed_id=None):
                 if len(matches) > 1:
                     raise ValueError("중복 세대 ID가 발견되어 저장을 중단합니다.")
                 target_row = matches[0] if matches else max(2, len(ids) + 1)
+                snapshot_key = f"case_baseline_{changed_id}"
+                if matches:
+                    remote = sheet.row_values(target_row)
+                    remote_hash = hashlib.sha256(json.dumps(remote[:9], ensure_ascii=False).encode()).hexdigest()
+                    baseline = st.session_state.get(snapshot_key)
+                    if baseline is not None and baseline != remote_hash:
+                        raise ValueError("다른 담당자가 먼저 수정했습니다. 변경 내용이 덮어써지지 않도록 저장을 중단했습니다. 새로고침 후 확인해 주세요.")
                 if not ids:
                     sheet.update(range_name="A1:I1", values=[CASE_HEADERS])
-                sheet.update(range_name=f"A{target_row}:I{target_row}", values=[case_to_sheet_row(item)])
+                updated_row = case_to_sheet_row(item)
+                sheet.update(range_name=f"A{target_row}:I{target_row}", values=[updated_row])
+                st.session_state[snapshot_key] = hashlib.sha256(json.dumps([str(v) for v in updated_row], ensure_ascii=False).encode()).hexdigest()
             else:
-                rows = [CASE_HEADERS] + [case_to_sheet_row(item) for item in data]
-                sheet.update(range_name=f"A1:I{len(rows)}", values=rows)
-                if sheet.row_count > len(rows):
-                    sheet.batch_clear([f"A{len(rows)+1}:I{sheet.row_count}"])
+                raise ValueError("전체 상담 시트 덮어쓰기는 동시 사용자 데이터 손실 방지를 위해 비활성화되었습니다.")
         except Exception as e:
             st.error(f"구글 시트 저장 실패: {e}")
             return False
@@ -406,7 +579,7 @@ def create_pdf_report(case_info):
 
     image_attachments = [
         msg.get("media_data") for msg in case_info.get("dialogue_history", [])
-        if msg.get("media_type") == "image" and msg.get("media_data") and msg.get("media_data").startswith("data:image")
+        if msg.get("media_type") == "image" and msg.get("media_data") and (str(msg.get("media_data")).startswith("data:image") or str(msg.get("media_data")).startswith(("sheetmedia:", "drivefile:")))
     ]
 
     if image_attachments:
@@ -416,7 +589,9 @@ def create_pdf_report(case_info):
 
         for idx, img_b64 in enumerate(image_attachments):
             try:
-                if "," in img_b64:
+                if str(img_b64).startswith(("sheetmedia:", "drivefile:")):
+                    img_data = resolve_media(img_b64, case_info.get("complex"), case_info.get("id"))
+                elif "," in img_b64:
                     img_data = base64.b64decode(img_b64.split(",")[1])
                 else:
                     img_data = base64.b64decode(img_b64)
@@ -441,8 +616,8 @@ if "active_complex" not in st.session_state:
     st.session_state.active_complex = None
 
 if "cases" not in st.session_state:
-    loaded_cases = load_data()
-    if not loaded_cases and get_gsheet_worksheet() is None and not os.path.exists(DATA_FILE):
+    loaded_cases = load_data(st.session_state.active_complex)
+    if not db_enabled() and not loaded_cases and get_gsheet_worksheet() is None and not os.path.exists(DATA_FILE):
         loaded_cases = [
             {
                 "id": "CASE-2026-001",
@@ -467,9 +642,30 @@ if "cases" not in st.session_state:
         save_data(loaded_cases)
     st.session_state.cases = loaded_cases
 
+# 최초 불러온 상담 건의 저장 당시 원본을 기록합니다.
+# Google Sheets는 원자적 비교 후 갱신을 제공하지 않으므로 동시 클릭 경합은 완전히 막지 못합니다.
+def initialize_case_baselines():
+    ws = get_gsheet_worksheet()
+    if ws is None:
+        return
+    try:
+        values = ws.get_all_values()
+        for row in values[1:]:
+            if row and row[0]:
+                key = f"case_baseline_{row[0]}"
+                if key not in st.session_state:
+                    st.session_state[key] = hashlib.sha256(json.dumps(row[:9], ensure_ascii=False).encode()).hexdigest()
+    except Exception:
+        pass
+
+if not st.session_state.get("_baselines_initialized"):
+    initialize_case_baselines()
+    st.session_state["_baselines_initialized"] = True
+
 # 단지 목록 구성: 기존 데이터의 단지명도 자동 포함
 complexes = load_complexes()
-complexes = ensure_complexes_from_cases(complexes, st.session_state.cases)
+if not db_enabled():
+    complexes = ensure_complexes_from_cases(complexes, st.session_state.cases)
 
 st.title("🏠 통합 주거복지 관리 & 위험도 진단 시스템")
 st.caption("단지를 선택한 뒤 해당 단지 비밀번호로 인증해야 상담 자료를 열람할 수 있습니다.")
@@ -485,6 +681,8 @@ with select_tab:
             st.success(f"🔓 {chosen_complex} 인증 완료")
             if st.button(f"{chosen_complex} 들어가기", type="primary", use_container_width=True):
                 st.session_state.active_complex = chosen_complex
+                if db_enabled():
+                    st.session_state.cases = load_data(chosen_complex)
                 st.rerun()
         else:
             with st.form("complex_login_form"):
@@ -494,6 +692,8 @@ with select_tab:
                     if verify_password(complex_pwd, complexes[chosen_complex]["password_hash"]):
                         st.session_state.complex_authenticated[chosen_complex] = True
                         st.session_state.active_complex = chosen_complex
+                        if db_enabled():
+                            st.session_state.cases = load_data(chosen_complex)
                         st.rerun()
                     else:
                         st.error("❌ 단지 비밀번호가 올바르지 않습니다.")
@@ -530,6 +730,8 @@ with create_tab:
                 save_complexes(complexes)
                 st.session_state.complex_authenticated[name] = True
                 st.session_state.active_complex = name
+                if db_enabled():
+                    st.session_state.cases = []
                 st.success(f"{name} 단지가 생성되었습니다.")
                 st.rerun()
 
@@ -583,9 +785,18 @@ with st.sidebar:
     if st.button("🚪 단지 로그아웃", use_container_width=True):
         st.session_state.complex_authenticated[active_complex] = False
         st.session_state.active_complex = None
+        if db_enabled():
+            st.session_state.cases = []
         st.session_state.pop("selected_case_id", None)
         st.rerun()
     
+    if db_enabled():
+        st.success("🟢 PostgreSQL 상담 데이터 저장 (동시 수정 보호)")
+    else:
+        st.caption("Google Sheets 저장: 수정 전 변경 감지 적용. 동시에 저장 버튼을 누르는 경우 완전한 충돌 방지는 어렵습니다.")
+    if not media_storage_enabled():
+        st.caption("첨부파일 보존: Google Sheets 연결 필요")
+
     st.divider()
     
     if OPENAI_API_KEY:
@@ -638,7 +849,11 @@ with st.sidebar:
                         # 단지 설정과 해당 단지의 모든 세대자료를 함께 영구 삭제
                         target = active_complex
                         st.session_state.cases = [c for c in st.session_state.cases if c.get("complex") != target]
-                        save_data(st.session_state.cases)
+                        if db_enabled():
+                            db_delete_complex(target)
+                        else:
+                            st.error("전체 단지 삭제는 동시 접속 중 데이터 손상 위험이 있어 차단했습니다. 관리자가 별도 백업 후 시트에서 처리해 주세요.")
+                        st.stop()
                         complexes.pop(target, None)
                         save_complexes(complexes)
                         st.session_state.complex_authenticated.pop(target, None)
@@ -691,7 +906,7 @@ with st.sidebar:
         
         if add_submit:
             if new_complex and new_unit and new_name:
-                new_id = f"CASE-{get_kst_now().strftime('%Y%m%d%H%M%S')}"
+                new_id = f"CASE-{uuid.uuid4().hex[:16]}"
                 new_record = {
                     "id": new_id,
                     "complex": new_complex,
@@ -786,9 +1001,9 @@ with tab1:
             message_text = st.text_area("대화 및 현장 메모를 입력하세요", height=80, placeholder="예: 보일러 누수 현장 확인 사진 첨부합니다.")
             
             uploaded_file = st.file_uploader(
-                "📷 현장 사진 또는 🎥 동영상 첨부 (선택)", 
+                "📷 현장 사진 (20MB 이하) 또는 🎥 동영상 (200MB 이하) 첨부", 
                 type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "avi"],
-                help="현장 파손 사진, 증빙 서류, 현장 녹화 동영상 등을 첨부할 수 있습니다."
+                help="원본 저장: 사진 최대 20MB, 동영상 최대 200MB. Drive 무료 용량 및 Streamlit 서버 메모리 제한이 적용됩니다."
             )
             
             submitted = st.form_submit_button("기록 및 첨부파일 저장", type="primary", use_container_width=True)
@@ -798,29 +1013,13 @@ with tab1:
                 media_data = None
                 
                 if uploaded_file is not None:
-                    file_type = uploaded_file.type
-                    
-                    if "image" in file_type:
-                        media_type = "image"
-                        try:
-                            img = Image.open(uploaded_file)
-                            if img.mode in ("RGBA", "P"):
-                                img = img.convert("RGB")
-                            img.thumbnail((600, 600))
-                            buffer = io.BytesIO()
-                            img.save(buffer, format="JPEG", quality=65)
-                            b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                            media_data = f"data:image/jpeg;base64,{b64_str}"
-                        except Exception:
-                            file_bytes = uploaded_file.read()
-                            b64_str = base64.b64encode(file_bytes).decode("utf-8")
-                            media_data = f"data:{file_type};base64,{b64_str}"
-                    elif "video" in file_type:
-                        media_type = "video"
-                        file_bytes = uploaded_file.read()
-                        b64_str = base64.b64encode(file_bytes).decode("utf-8")
-                        media_data = f"data:{file_type};base64,{b64_str}"
-                
+                    try:
+                        media_type = "image" if uploaded_file.type.startswith("image/") else "video"
+                        media_data = save_media_file(uploaded_file, active_complex, current_case["id"])
+                    except Exception as e:
+                        st.error(f"첨부파일 저장 실패: {e}")
+                        st.stop()
+
                 new_msg = {
                     "speaker": speaker.strip() if speaker.strip() else "기타",
                     "text": message_text.strip(),
@@ -853,31 +1052,16 @@ with tab1:
                     m_data = msg.get("media_data")
                     m_type = msg.get("media_type")
                     
-                    if m_type == "image" and m_data:
-                        if isinstance(m_data, str) and (m_data.startswith("data:image") or m_data.startswith("http://") or m_data.startswith("https://")):
-                            try:
-                                st.image(m_data, caption="📷 현장 첨부 사진", use_container_width=True)
-                            except Exception:
-                                st.caption(f"📷 현장 사진: {m_data}")
-                        else:
-                            st.caption(f"📷 현장 사진 상태: {m_data}")
-                    elif m_type == "video" and m_data:
-                        if isinstance(m_data, str) and (m_data.startswith("data:video") or m_data.startswith("http://") or m_data.startswith("https://")):
-                            try:
-                                st.video(m_data)
-                                st.caption("🎥 현장 첨부 동영상")
-                            except Exception:
-                                st.caption(f"🎥 현장 동영상: {m_data}")
-                        else:
-                            st.caption(f"🎥 현장 동영상 상태: {m_data}")
-                        
+                    if m_type in ("image", "video") and m_data:
+                        display_saved_media(m_data, m_type, active_complex, current_case["id"], f"chat_{current_case['id']}_{idx}")
+
                     st.divider()
 
         if auto_sync:
             @st.fragment(run_every=60)
             def live_chat_area():
                 load_data.clear()
-                fresh_cases = load_data()
+                fresh_cases = load_data(active_complex)
                 fresh_case = next((c for c in fresh_cases if c.get("id") == selected_id and c.get("complex") == active_complex), current_case)
                 display_messages(fresh_case)
             live_chat_area()
@@ -885,7 +1069,8 @@ with tab1:
             display_messages(current_case)
 
     with col_summary:
-        st.write("##### 🤖 AI 자동 문서화 및 보고서 요약")
+        st.write("##### 🤖 AI 자동 문서화 · 기관 우선순위 · 선제 조치")
+        st.caption("상담 내용에 관련된 기관을 개수 제한 없이 우선순위로 제시하고, 관리소의 즉시·당일·후속 조치를 안내합니다. 실제 기관 접수 및 지원 가능 여부는 확인이 필요합니다.")
         
         if st.button("✨ 전체 대화 내용 AI 자동 요약 생성", type="primary", use_container_width=True):
             history = current_case.get("dialogue_history", [])
@@ -894,66 +1079,99 @@ with tab1:
             elif not OPENAI_API_KEY:
                 st.error("OpenAI API 키가 필요합니다. 사이드바에서 키를 입력해주세요.")
             else:
-                with st.spinner("AI가 대화 내용을 분석하여 위기 상황별 상세 기관, 전화번호, 신청 사이트를 추출 중입니다..."):
+                with st.spinner("AI가 관련 기관 전체의 우선순위와 관리소 선제 조치를 분석 중입니다..."):
                     try:
                         import openai
-                        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+                        client = openai.OpenAI(api_key=OPENAI_API_KEY, max_retries=2)
                         
-                        raw_dialogue = "\n".join([f"{m.get('speaker')}: {m.get('text')}" for m in history])
+                        raw_dialogue = "\n".join([f"{m.get('speaker')}: {m.get('text')}" for m in history])[-45000:]
                         
-                        # 범용 위기 상황 감지 및 기관/전화번호/사이트/서비스 자동 도출 프롬프트
+                        # 관련 기관 수를 임의로 3개로 제한하지 않고, 상담 내용에 근거한 기관을 우선순위별로 제시.
+                        # 특정 기관의 실제 접수 가능 여부는 확인되지 않았으므로 기관 "유형"과 확인 경로를 구분한다.
                         prompt = f"""
-                        당신은 대한민국 주택관리공단의 현장 맞춤형 주거복지 전문가입니다. 
-                        아래 대화 내용을 바탕으로 표준 주거복지 상담보고서를 작성하세요.
+당신은 대한민국 주거복지 현장 상담을 지원하는 실무 보조 전문가입니다.
+상담 기록에 근거하여 주거복지 상담보고서와 선제 조치 계획을 한국어로 작성하세요.
+대화에 없는 사실, 진단, 수급 자격, 기관 실명/주소/전화번호/URL을 만들어내지 마세요.
+지원 자격 및 지원 여부는 담당 기관 확인이 필요하며, AI 결과는 신청/접수/승인을 뜻하지 않습니다.
 
-                        [대상 세대 정보]
-                        - 단지/동호수: {current_case.get('complex')} {current_case.get('unit')}
-                        - 입주민 성명: {current_case.get('resident_name')}
+[대상 세대 정보]
+- 단지/동호수: {current_case.get('complex')} {current_case.get('unit')}
+- 입주민 성명: {current_case.get('resident_name')}
+- 현재 체크리스트 위험도: {current_case.get('risk_level', '관심')}
+- 영역별 점수: {json.dumps(current_case.get('scores', {}), ensure_ascii=False)}
 
-                        [대화 내용]
-                        {raw_dialogue}
+[상담 내용]
+{raw_dialogue}
 
-                        [작성 지침 및 원칙]
-                        1. "관련 기관과의 협력 체계 강화", "지자체 연계 추진" 등의 추상적이고 단순한 표현은 절대 사용하지 마세요.
-                        2. 대화에 나타난 입주민의 모든 위기 요소(예: 치매/건강, 임대료/관리비 체납, 저장강박/쓰레기 방치, 정신건강/우울/알코올, 사회적 고립, 보일러/시설 파손 등)를 자동으로 추출하세요.
-                        3. 추출된 위기 요소별로 실제 입주민 또는 주거복지사가 즉시 연계 신청할 수 있도록 **복지 제도명, 전문 연계 기관, 대표 전화번호, 공식 신청 사이트(URL), 구체적 지원 서비스 목록**을 상세하게 작성하세요.
-                        4. **[중요 - 전화번호 작성 규칙]** 절대 '02-1234-5678'이나 '010-0000-0000' 같은 임의의 가짜 예시 번호를 작성하지 마세요. 해당 위기 영역의 실제 전국 공공 대표 콜센터 번호(예: 보건복지상담센터 ☎ 129, 지자체 통합콜센터 ☎ 120, 치매상담콜센터 ☎ 1899-9988, 정신건강상담전화 ☎ 1577-0199, 주택관리공단 ☎ 1600-0777 등)를 정확히 명시하세요.
+[분석 원칙]
+1. 상담에서 확인된 사실과 추정/확인 필요 사항을 분리합니다. 언급되지 않은 문제는 임의로 추가하지 않습니다.
+2. 주거비/체납, 생계, 건강, 돌봄, 치매, 정신건강, 고립, 장애, 아동, 노인, 안전, 시설, 위생, 폭력 등 실제 드러난 문제를 빠짐없이 분석합니다.
+3. **추천 기관을 3개로 제한하지 마세요.** 실제 문제와 관련된 기관 유형을 가능한 한 모두 제시하되, 관련성이 낮은 기관을 수만 채우려고 나열하지 마세요. 중복 기관은 묶고, 복수의 문제가 있으면 분야별로 충분히 추천하세요.
+4. 각 기관의 **우선순위(1순위부터)**는 긴급성, 현장 개입 가능성, 신청 접근성, 중복지원 가능성 확인 필요 등을 고려하여 정렬하고 근거를 명시합니다.
+5. 실제 기관명/담당자/전화번호/신청 URL이 상담에 없으면 임의 생성하지 말고 '관할 지역 기관 확인 필요'라고 씁니다. 전국 공통 상담 경로는 확실할 때만 제시하고 최신 정보 재확인을 안내합니다.
+6. 복지 지원은 대상자의 동의, 자격, 예산, 지역별 사업 유무에 따라 달라집니다. 지원 확정처럼 단정하지 마세요.
+7. 관리사무소가 자체적으로 할 수 있는 조치와 외부 기관이 판단/처리할 사항을 명확히 구분합니다. 개인정보는 적법한 근거 없이 외부 전송하지 않습니다.
+8. 응급 위험(의식 저하, 자·타해 급박 위험, 화재/가스/전기 사고 등)이 확인되는 경우, 일반 복지 신청보다 119/112 등 적절한 긴급 대응을 우선 제안합니다. 위기 신호가 불명확하면 확인할 질문을 제시합니다.
+9. 긴급복지, 기초생활보장, 주거급여, 에너지 지원 등 제도는 '검토 가능한 후보'로 표시하고 적격 여부를 확정하지 않습니다.
+10. 모호한 '협력 체계 강화' 대신 담당자가 실제로 할 일, 기한, 확인 증빙을 구체적으로 적습니다.
 
-                        [작성 양식]
-                        ■ 개요 및 현황
-                        ■ 주거 위기 주요 문제점
+[출력 형식 - 아래 순서와 제목 준수]
+■ 1. 상담 핵심 요약
+- 확인된 사실 / 추가 확인이 필요한 사항 / 주요 위험 요소
 
-                        ■ 💡 위기 상황별 맞춤 지원 기관 및 복지 제도 안내 (필수 작성)
-                        (대화에서 감지된 위기 유형별로 아래 포맷을 유지하며 구체적으로 작성하세요)
+■ 2. 위기 상황별 지원 필요성
+- 각 위기 요소의 근거(상담 발언), 긴급성, 검토할 지원 제도와 확인할 자격
 
-                        • [위기 유형 1] (예: 치매 및 인지기능 장애 / 임대료 체납 / 저장강박 등)
-                          - 지원 복지 제도: (정확한 제도명)
-                          - 연계/신청 기관: (담당 공공기관 또는 전문 센터명)
-                          - 대표 전화번호: (실제 공공 대표 전화번호, 예: ☎ 129 보건복지상담센터 / ☎ 120 다산콜센터)
-                          - 공식 신청 사이트: (신청 가능한 웹사이트 URL, 예: 복지로 bokjiro.go.kr)
-                          - 신청 가능한 주요 서비스:
-                            1) (구체적 지원 서비스 1)
-                            2) (구체적 지원 서비스 2)
-                            3) (구체적 지원 서비스 3)
+■ 3. 지원 가능 기관 우선순위 전체 목록
+상담에 실질적으로 관련 있는 기관을 1순위부터 빠짐없이 작성하세요. **기관 수 고정 제한 없음.**
+각 기관마다 아래 내용을 반복하세요.
+[우선순위 N] 기관 유형(실제 지역 기관명 미확인 시 유형으로만 표기)
+- 추천 이유 및 상담 근거:
+- 연계할 문제/지원받을 수 있는 서비스(확정이 아닌 검토 대상):
+- 신청/상담 경로(확인된 경로만; 불명확하면 확인 필요):
+- 관리소가 준비할 자료 및 입주민 동의 사항:
+- 기관에 확인할 사항(대상 자격, 접수 방법, 지역 담당 여부):
+- 우선순위 선정 이유:
 
-                        • [위기 유형 2] (감지된 다른 위기 요소가 있을 경우 계속 작성)
-                          - 지원 복지 제도: ...
-                          - 연계/신청 기관: ...
-                          - 대표 전화번호: ...
-                          - 공식 신청 사이트: ...
-                          - 신청 가능한 주요 서비스: ...
-                        """
-                        
+■ 4. 관리소 선제 조치 계획 (우선순위 순)
+[즉시: 안전 위험이 있는 경우 우선]
+[당일: 현장 확인, 안전조치, 입주민 의사 확인, 담당자 보고 등]
+[1~3일 이내: 기관 연락, 상담 예약, 신청 준비, 내부 승인 등]
+[1~2주 이내: 접수 확인, 결과 점검, 미연계 사유 보완 등]
+각 항목은 '조치 내용 / 담당 주체(관리소·입주민·외부기관 구분) / 기한 / 완료 확인 방법'으로 작성하세요.
+해당 상황에 필요하지 않은 조치는 '해당 없음'으로 표시하세요.
+
+■ 5. 입주민에게 추가로 확인할 질문
+- 지원 신청 및 안전 판단에 꼭 필요한 질문을 3~7개 작성
+
+■ 6. 연계·사후관리 체크리스트
+- 동의 및 최소정보 제공 확인, 연락 시도, 신청 여부, 기관 접수 확인, 지원 결과, 다음 확인일
+
+■ 7. 유의사항
+- 본 내용은 상담에 기반한 검토안이며, 실제 지원 가능 여부는 기관 확인 후 결정됩니다.
+"""
+
                         response = client.chat.completions.create(
                             model="gpt-4o-mini",
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.2
+                            messages=[
+                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 상담에 없는 사실을 꾸미지 마세요."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            temperature=0.2,
+                            max_tokens=6500,
+                            timeout=75.0,
                         )
-                        
+
                         summary_result = response.choices[0].message.content
+                        if not summary_result or not summary_result.strip():
+                            raise ValueError("AI가 빈 요약문을 반환했습니다.")
+                        previous_summary = current_case.get("ai_summary", "")
                         current_case["ai_summary"] = summary_result
-                        save_data(st.session_state.cases, changed_id=current_case["id"])
-                        st.success("AI 보고서 요약 및 위기별 상세 기관/연락처/사이트 연계 안 작성이 완료되었습니다!")
+                        if not save_data(st.session_state.cases, changed_id=current_case["id"]):
+                            current_case["ai_summary"] = previous_summary
+                            st.error("요약문 저장에 실패했습니다. 기존 요약문을 유지합니다.")
+                            st.stop()
+                        st.success("AI 보고서에 관련 기관 우선순위와 선제 조치 계획을 작성했습니다.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
@@ -967,20 +1185,14 @@ with tab1:
                 st.success("요약문이 저장되었습니다.")
                 st.rerun()
 
-        image_attachments = [
-            msg.get("media_data") for msg in current_case.get("dialogue_history", [])
-            if msg.get("media_type") == "image" and msg.get("media_data") and str(msg.get("media_data")).startswith("data:image")
-        ]
-        
-        if image_attachments:
-            st.markdown("##### 📷 보고서 포함 현장 이미지")
-            img_cols = st.columns(min(len(image_attachments), 3))
-            for idx, img_data in enumerate(image_attachments):
-                with img_cols[idx % 3]:
-                    try:
-                        st.image(img_data, caption=f"현장 사진 #{idx+1}", use_container_width=True)
-                    except Exception:
-                        pass
+        attachments = [(idx, msg) for idx, msg in enumerate(current_case.get("dialogue_history", []))
+                       if msg.get("media_type") in ("image", "video") and msg.get("media_data")]
+        if attachments:
+            st.markdown("##### 📷🎥 AI 요약 관련 현장 첨부파일")
+            st.caption("요약과 함께 사진·동영상을 확인할 수 있습니다. 파일은 열기를 누를 때만 불러옵니다. AI가 영상을 분석한 것은 아닙니다.")
+            for idx, msg in attachments:
+                display_saved_media(msg["media_data"], msg["media_type"], active_complex,
+                                    current_case["id"], f"summary_{current_case['id']}_{idx}")
 
         st.markdown("##### 📥 보고서 파일 내보내기")
         col_exp1, col_exp2 = st.columns(2)
@@ -1131,13 +1343,13 @@ with tab3:
     st.subheader("📁 세대 전체 관리 및 데이터 영구 보존 현황")
     
     if get_gsheet_worksheet() is not None:
-        st.success("🎉 **구글 시트(Google Sheets)와 연동되어 데이터가 실시간 영구 보존되고 있습니다.**")
+        st.success("Google Sheets 저장 중 · 수정 전 원본 비교로 충돌을 감지합니다 (완전한 동시성 보장은 아님).")
     else:
-        st.warning("⚠️ 현재 구글 시트 미연동 상태로, 로컬 파일에만 저장됩니다.")
+        st.warning("Google Sheets 미연동: 클라우드 영구 저장을 보장하지 않습니다.")
 
     st.divider()
 
-    st.markdown("#### 💾 수동 백업 및 1초 복원 (비상용)")
+    st.markdown("#### 💾 수동 백업 및 복원 (비상용)")
     
     col_bak1, col_bak2 = st.columns(2)
     with col_bak1:
@@ -1160,9 +1372,17 @@ with tab3:
                     restored = [sanitize_case(item, i) for i, item in enumerate(restored_data)]
                     for item in restored:
                         item["complex"] = active_complex
-                    st.session_state.cases = [c for c in st.session_state.cases if c.get("complex") != active_complex] + restored
-                    save_data(st.session_state.cases)
-                    st.success("🎉 데이터 복원이 성공적으로 완료되었습니다!")
+                    # 다른 관리소 데이터는 건드리지 않고 신규 ID만 추가합니다.
+                    existing_ids = {c.get("id") for c in st.session_state.cases}
+                    imported = 0
+                    for item in restored:
+                        if item.get("id") not in existing_ids:
+                            if save_data(st.session_state.cases + [item], changed_id=item["id"]):
+                                st.session_state.cases.append(item)
+                                existing_ids.add(item["id"])
+                                imported += 1
+                    st.info(f"신규 상담 {imported}건을 추가했습니다. 기존 상담은 덮어쓰지 않았습니다.")
+                    st.success("🎉 복원 완료 (DB 모드에서는 기존 건을 덮어쓰지 않음)")
                     st.rerun()
             except Exception as e:
                 st.error(f"❌ 복원 실패: {e}")
@@ -1202,8 +1422,26 @@ with tab3:
                     st.error("❌ 확인란에 '삭제'라고 정확히 입력해 주세요.")
                 else:
                     delete_id = current_case.get("id")
-                    st.session_state.cases = [c for c in st.session_state.cases if c.get("id") != delete_id]
-                    save_data(st.session_state.cases)
+                    try:
+                        remaining=[c for c in st.session_state.cases if c.get("id") != delete_id]
+                        # 전체 시트 재작성은 다른 관리소 데이터를 손상시킬 수 있으므로 사용하지 않습니다.
+                        ws = get_gsheet_worksheet()
+                        ids = ws.col_values(1)
+                        matches = [i+1 for i,v in enumerate(ids) if i>0 and v==delete_id]
+                        if len(matches) != 1:
+                            raise ValueError("삭제할 상담 건을 유일하게 확인할 수 없습니다.")
+                        rownum = matches[0]
+                        remote = ws.row_values(rownum)
+                        baseline = st.session_state.get(f"case_baseline_{delete_id}")
+                        remote_hash = hashlib.sha256(json.dumps(remote[:9],ensure_ascii=False).encode()).hexdigest()
+                        if baseline and remote_hash != baseline:
+                            raise ValueError("다른 담당자가 수정했습니다. 다시 불러온 뒤 삭제해 주세요.")
+                        ws.delete_rows(rownum)
+                        load_data.clear()
+                        st.session_state.cases=[c for c in st.session_state.cases if c.get("id") != delete_id]
+                    except Exception as e:
+                        st.error(f"삭제 실패: {e}")
+                        st.stop()
                     st.session_state.delete_confirm_id = None
                     st.session_state.pop("selected_case_id", None)
                     st.success("해당 세대가 삭제되었습니다.")
