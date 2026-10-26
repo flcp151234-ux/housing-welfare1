@@ -807,13 +807,15 @@ CONTACT_LINE_RE = re.compile(
     r"^\\s*[-•]?\\s*(?:대표\\s*)?(?:전화번호|연락처|직통번호|대표번호)\\s*[:：]"
 )
 def clean_summary_and_add_official_hotlines(report, dialogue):
+    # 모델이 실제 줄바꿈 대신 문자 그대로 \n을 반환하는 경우 복원
+    report = report.replace("\\r\\n", "\n").replace("\\n", "\n")
     lines = []
     for line in report.splitlines():
         if CONTACT_LINE_RE.match(line):
             continue
         line = PHONE_LIKE_RE.sub("", line)
         # 기존 보고서의 가짜 번호를 없애고 번호 없는 항목도 제거
-        if re.match(r"^\\s*[-•]?\\s*(?:전화|연락처|대표번호)\\s*[:：]\\s*$", line):
+        if re.match(r"^\s*[-•]?\s*(?:전화|연락처|대표번호)\s*[:：]\s*$", line):
             continue
         lines.append(line)
     # 상담 내용에 등장한 분야에만 연결하며 기관 직통번호인 것처럼 표기하지 않습니다.
@@ -824,7 +826,7 @@ def clean_summary_and_add_official_hotlines(report, dialogue):
             selected.append(f"- {agency} 대표 상담번호: {phone}")
     if selected:
         lines.extend(["", "■ 상담 내용에 해당하는 공식 대표 상담번호", *selected])
-    return "\\n".join(lines)
+    return "\n".join(lines).strip()
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 with st.sidebar:
@@ -1168,7 +1170,7 @@ with tab1:
 7. 관리사무소가 자체적으로 할 수 있는 조치와 외부 기관이 판단/처리할 사항을 명확히 구분합니다. 개인정보는 적법한 근거 없이 외부 전송하지 않습니다.
 8. 응급 위험(의식 저하, 자·타해 급박 위험, 화재/가스/전기 사고 등)이 확인되는 경우, 일반 복지 신청보다 119/112 등 적절한 긴급 대응을 우선 제안합니다. 위기 신호가 불명확하면 확인할 질문을 제시합니다.
 9. 긴급복지, 기초생활보장, 주거급여, 에너지 지원 등 제도는 '검토 가능한 후보'로 표시하고 적격 여부를 확정하지 않습니다.
-10. 모호한 '협력 체계 강화' 대신 담당자가 실제로 할 일, 기한, 확인 증빙을 구체적으로 적습니다.
+10. 모호한 '협력 체계 강화' 대신 담당자가 실제로 할 일, 기한, 확인 증빙을 구체적으로 적습니다.\n11. 저장강박이나 위생 악화 사례에서는 당사자 동의에 따른 방문상담, 보건소·정신건강복지센터 평가, 지자체 통합사례관리, 주거환경 개선사업 가능 여부를 구체적으로 검토하되 서비스 제공을 확정하지 않습니다.\n12. Markdown 제목과 줄바꿈은 실제 개행문자로 출력합니다. 백슬래시+n 문자를 출력하지 마세요.
 
 [출력 형식 - 아래 순서와 제목 준수]
 ■ 1. 상담 핵심 요약
@@ -1179,7 +1181,7 @@ with tab1:
 
 ■ 3. 지원 가능 기관 우선순위 전체 목록
 상담에 실질적으로 관련 있는 기관을 1순위부터 빠짐없이 작성하세요. **기관 수 고정 제한 없음.**
-각 기관마다 아래 내용을 반복하세요.
+각 기관마다 아래 내용을 반복하되, 같은 말을 반복하지 말고 구체적인 행동과 실제 가능한 지원 후보를 간결하게 작성하세요. 지역 기관의 실명이나 전화번호를 모르면 만들어내지 말고 기관 유형을 명확히 쓰세요.
 [우선순위 N] 기관 유형(실제 지역 기관명 미확인 시 유형으로만 표기)
 - 추천 이유 및 상담 근거:
 - 연계할 문제/지원받을 수 있는 서비스(확정이 아닌 검토 대상):
@@ -1234,7 +1236,7 @@ with tab1:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
 
         with st.form(key=f"summary_edit_{current_case['id']}"):
-            edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=320)
+            edited_summary = st.text_area("AI 생성 보고서 요약본", value=str(current_case.get("ai_summary", "")).replace("\\n", "\n"), height=320)
             save_summary = st.form_submit_button("💾 수정한 요약문 저장")
         if save_summary and edited_summary != current_case.get("ai_summary", ""):
             current_case["ai_summary"] = edited_summary
