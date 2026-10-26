@@ -822,56 +822,52 @@ VERIFIED_CONTACTS = (
 PHONE_LIKE_RE = re.compile(r"(?<!\w)(?:\+82[- .]?)?(?:0\d{1,2}[- .]?)?\d{3,4}[- .]?\d{4}(?!\w)|(?<!\d)(?:129|110|109|112|119|1366)(?!\d)")
 CONTACT_LINE_RE = re.compile(r"^\s*[-•]?\s*(?:대표\s*)?(?:전화번호|연락처|직통번호|대표번호)\s*[:：]")
 def clean_summary_and_add_official_hotlines(report, dialogue):
-    """각 우선순위 항목의 기존 '신청/상담 경로' 줄 끝에 공식 안내번호를 표시."""
-    report = str(report).replace("\\r\\n", "\n").replace("\\n", "\n")
+    """우선순위마다 신청/상담 경로의 같은 줄에 실제 등록된 공식 대표번호 표시."""
+    report = str(report or "").replace("\\r\\n", "\n").replace("\\n", "\n")
     report = report.split("## 상담 내용별 공식 대표 상담번호")[0].rstrip()
-    lines = report.splitlines()
-    cleaned = []
-    for line in lines:
-        if line.strip().startswith(("- **관련 공식 상담전화**:", "- **지원 신청 안내**:")):
+    # 제목이 '### [우선순위 3]', '**[우선순위 3]**', '[우선순위 3]' 등으로
+    # 생성되어도 처리. 이전에는 ### 형식만 인식해서 번호가 전혀 안 붙었음.
+    heading_re = re.compile(r"(?m)^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?\[우선순위\s*\d+\]")
+    starts = [m.start() for m in heading_re.finditer(report)]
+    if not starts:
+        return report
+    parts = [report[:starts[0]]] + [report[starts[i]:starts[i+1] if i+1 < len(starts) else len(report)] for i in range(len(starts))]
+    out = [parts[0]]
+    for section in parts[1:]:
+        sec_lines = section.splitlines(keepends=True)
+        if not sec_lines:
             continue
-        # 이전 버전에서 붙인 전화번호만 제거하고 기존 상담경로 설명은 보존
-        if "신청/상담 경로" in line:
-            line = line.split(" (공식 상담번호:")[0]
-            line = re.sub(r"\s*[（(]?\s*(?:공식\s*)?(?:대표\s*)?(?:상담)?전화(?:번호)?\s*[:：]?\s*[^）)]*☎\s*[0-9-]+[^）)]*[）)]?", "", line)
-            line = re.sub(r"\s*\|\s*(?:공식\s*)?(?:대표\s*)?(?:상담)?전화(?:번호)?\s*[:：]?.*$", "", line)
-        cleaned.append(line)
-    report = "\n".join(cleaned)
-    sections = re.split(r"(?=^#{2,4}\s*\[우선순위\s*\d+\])", report, flags=re.MULTILINE)
-    result = []
-    for section in sections:
-        if not re.match(r"^#{2,4}\s*\[우선순위\s*\d+\]", section):
-            result.append(section)
-            continue
-        heading = section.splitlines()[0]
-        # 우선순위별 제목/지원내용/신청경로에서 관련 번호만 선택
-        keywords_text = section.lower()
+        heading = sec_lines[0].lower()
+        # 이전 실행에서 붙인 공식번호를 제거한 뒤 재연결해 중복 방지
+        for i, line in enumerate(sec_lines):
+            if "신청/상담 경로" in line:
+                line = re.sub(r"\s*\(공식 상담번호:.*?\)(?=\s*$)", "", line.rstrip("\n"))
+                sec_lines[i] = line + "\n"
+        section_text = "".join(sec_lines).lower()
         matches = []
         for keywords, agency, phone in VERIFIED_CONTACTS:
-            if any(k.lower() in keywords_text for k in keywords):
+            if any(k.lower() in section_text for k in keywords):
                 if (agency, phone) not in matches:
                     matches.append((agency, phone))
-        # 방문건강관리·보건소는 공식 문의처 129 (지역 보건소 직통번호 아님)
-        if not matches and any(k in keywords_text for k in ("보건소", "방문 간호", "방문간호", "건강 관리", "건강관리", "건강 관리 서비스")):
+        if not matches and any(k in section_text for k in ("보건소", "방문 간호", "방문간호", "건강 관리", "건강관리", "건강 관리 서비스", "건강 상태")):
             matches.append(("보건복지상담센터", "129"))
         if not matches:
-            result.append(section)
+            out.append("".join(sec_lines))
             continue
-        # 번호가 여럿이면 우선순위 항목의 제목과 가장 잘 맞는 번호를 우선
         heading_matches = [(agency, phone) for keywords, agency, phone in VERIFIED_CONTACTS
-                           if any(k.lower() in heading.lower() for k in keywords)]
+                           if any(k.lower() in heading for k in keywords)]
         if heading_matches:
             matches = list(dict.fromkeys(heading_matches + matches))
+        # 대표번호는 해당 기관의 직통번호가 아닌 '관련 공식 상담번호'임을 명시
         contact = " / ".join(f"{agency} ☎ {phone}" for agency, phone in matches[:2])
-        sec_lines = section.splitlines()
         route_index = next((i for i, line in enumerate(sec_lines) if "신청/상담 경로" in line), None)
         if route_index is not None:
-            sec_lines[route_index] = sec_lines[route_index].rstrip() + f" (공식 상담번호: {contact})"
+            line = sec_lines[route_index].rstrip("\n").rstrip()
+            sec_lines[route_index] = f"{line} (공식 상담번호: {contact})\n"
         else:
-            insert_index = next((i+1 for i, line in enumerate(sec_lines) if "연계할 문제/지원받을 수 있는 서비스" in line), 1)
-            sec_lines.insert(insert_index, f"- **신청/상담 경로**: 관련 기관에 전화 또는 방문 상담 (공식 상담번호: {contact})")
-        result.append("\n".join(sec_lines) + ("\n" if section.endswith("\n") else ""))
-    return "".join(result).rstrip()
+            sec_lines.insert(1, f"- 신청/상담 경로: 관련 기관에 전화 또는 방문 상담 (공식 상담번호: {contact})\n")
+        out.append("".join(sec_lines))
+    return "".join(out).rstrip()
 
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
