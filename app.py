@@ -816,25 +816,59 @@ VERIFIED_CONTACTS = (
 PHONE_LIKE_RE = re.compile(r"(?<!\w)(?:\+82[- .]?)?(?:0\d{1,2}[- .]?)?\d{3,4}[- .]?\d{4}(?!\w)|(?<!\d)(?:129|110|109|112|119|1366)(?!\d)")
 CONTACT_LINE_RE = re.compile(r"^\s*[-•]?\s*(?:대표\s*)?(?:전화번호|연락처|직통번호|대표번호)\s*[:：]")
 def clean_summary_and_add_official_hotlines(report, dialogue):
-    report = report.replace("\\r\\n", "\n").replace("\\n", "\n")
+    """추천 기관의 지원서비스 설명 바로 아래에 공식 대표 상담번호를 표시."""
+    report = str(report).replace("\\r\\n", "\n").replace("\\n", "\n")
+    # 과거 버전이 생성한 별도 번호 목록 및 이 버전의 자동 삽입 행은 다시 생성
     report = report.split("## 상담 내용별 공식 대표 상담번호")[0].rstrip()
-    lines = []
+    cleaned = []
     for line in report.splitlines():
+        if line.strip().startswith("- **관련 공식 상담전화**:") or line.strip().startswith("- **지원 신청 안내**:"):
+            continue
         if CONTACT_LINE_RE.match(line):
             continue
-        line = PHONE_LIKE_RE.sub("", line)
-        if re.match(r"^\s*[-•]?\s*(?:전화|연락처|대표번호)\s*[:：]\s*$", line):
+        cleaned.append(PHONE_LIKE_RE.sub("", line))
+    report = "\n".join(cleaned)
+
+    # 기관별 지원내용이 이미 작성된 경우 그 내용을 그대로 살리고, 번호와 신청경로만 보강
+    sections = re.split(r"(?=^### \[우선순위\s*\d+\])", report, flags=re.MULTILINE)
+    output = []
+    any_inline = False
+    for section in sections:
+        if not re.match(r"^### \[우선순위\s*\d+\]", section):
+            output.append(section)
             continue
-        lines.append(line)
-    source = (dialogue + "\n" + report).lower()
-    selected = []
-    for keywords, agency, phone in VERIFIED_CONTACTS:
-        if any(k in source for k in keywords):
-            selected.append(f"- {agency} 공식 대표 상담번호: {phone}")
-    if selected:
-        lines.extend(["", "## 상담 내용별 공식 대표 상담번호", *selected,
-                      "※ 지역 복지관·치매안심센터 등 개별 기관의 직통번호가 아닌, 해당 분야의 전국 대표 상담번호입니다."])
-    return "\n".join(lines).strip()
+        matched = []
+        low = section.lower()
+        for keywords, agency, phone in VERIFIED_CONTACTS:
+            if any(k.lower() in low for k in keywords):
+                item = (agency, phone)
+                if item not in matched:
+                    matched.append(item)
+        if not matched:
+            output.append(section)
+            continue
+        any_inline = True
+        contact_lines = ["- **관련 공식 상담전화**: " + " / ".join(f"{agency} ☎ {phone}" for agency, phone in matched[:3]),
+                         "- **지원 신청 안내**: 위 대표 상담번호로 지원 대상·필요서류·관할 접수기관을 문의한 뒤 해당 기관에 신청하세요. (표시된 번호는 지역 개별 기관의 직통번호가 아닙니다.)"]
+        sec_lines = section.rstrip().splitlines()
+        insert_at = next((i+1 for i, line in enumerate(sec_lines) if "연계할 문제/지원받을 수 있는 서비스" in line), None)
+        if insert_at is None:
+            insert_at = next((i+1 for i, line in enumerate(sec_lines) if "추천 이유 및 상담 근거" in line), 1)
+        sec_lines[insert_at:insert_at] = contact_lines
+        output.append("\n".join(sec_lines) + "\n")
+    result = "".join(output).rstrip()
+    if not any_inline:
+        source = (dialogue + "\n" + report).lower()
+        matched = []
+        for keywords, agency, phone in VERIFIED_CONTACTS:
+            if any(k.lower() in source for k in keywords) and (agency, phone) not in matched:
+                matched.append((agency, phone))
+        if matched:
+            result += "\n\n## 상담 내용별 공식 대표 상담번호\n" + "\n".join(
+                f"- {agency}: {phone}" for agency, phone in matched
+            ) + "\n※ 지역 기관 직통번호가 아닌 전국 대표 상담번호입니다."
+    return result
+
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 with st.sidebar:
@@ -1220,7 +1254,7 @@ with tab1:
                         response = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[
-                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 전화번호를 절대로 작성하지 마세요. 전화번호는 프로그램에서 별도로 삽입합니다. 상담에 없는 사실을 꾸미지 마세요. 추천 기관별로 지원받을 수 있는 서비스와 신청 방법을 구체적으로 작성하세요."},
+                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 전화번호를 절대로 작성하지 마세요. 전화번호는 프로그램에서 별도로 삽입합니다. 상담에 없는 사실을 꾸미지 마세요. 추천 기관별로 지원받을 수 있는 서비스와 신청 방법을 구체적으로 작성하세요. 각 추천 기관마다 지원받을 수 있는 서비스 항목에 실제 신청 가능한 지원 후보를 명확히 적으세요. 전화번호는 프로그램이 추천 기관별 항목 안에 자동 삽입합니다."},
                                 {"role": "user", "content": prompt}
                             ],
                             temperature=0.2,
