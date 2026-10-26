@@ -1,5 +1,6 @@
 import streamlit as st
 import json
+import re
 import os
 import datetime
 import hashlib
@@ -10,8 +11,6 @@ import io
 import uuid
 import mimetypes
 import tempfile
-import re
-import csv
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from google.oauth2.credentials import Credentials as UserCredentials
@@ -49,68 +48,6 @@ ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "")
 if not ADMIN_PASSWORD:
     st.error("Streamlit Secrets에 ADMIN_PASSWORD를 설정해야 합니다.")
     st.stop()
-
-# 검증된 기관 대표번호만 표시합니다. AI가 생성한 번호는 사용하지 않습니다.
-# 기관별 공개 대표번호는 verified_agency_phones.csv 에 등록할 수 있습니다.
-VERIFIED_AGENCY_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verified_agency_phones.csv")
-# 공식 기관에서 공개한 전국 공통 상담번호: 해당 기관에만 연결합니다.
-OFFICIAL_NATIONAL_CONTACTS = {
-    "보건복지상담센터": "129",
-    "사회서비스 전자바우처": "1566-3232",
-}
-PHONE_TOKEN_RE = re.compile(r"(?<![0-9])(?:\+82[-. ]?)?0\d{1,2}[-. ]?\d{3,4}[-. ]?\d{4}(?![0-9])|(?<![0-9])\d{3,4}[-. ]\d{4}(?![0-9])|(?<![0-9])(?:129|110|112|119)(?![0-9])")
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_verified_agency_phones():
-    """Local government/open-data CSV: agency_name, region, phone, source."""
-    records = []
-    if not os.path.isfile(VERIFIED_AGENCY_CSV):
-        return records
-    with open(VERIFIED_AGENCY_CSV, encoding="utf-8-sig", newline="") as fp:
-        for row in csv.DictReader(fp):
-            name = str(row.get("agency_name", "")).strip()
-            region = str(row.get("region", "")).strip()
-            phone = str(row.get("phone", "")).strip()
-            source = str(row.get("source", "")).strip()
-            if name and source and PHONE_TOKEN_RE.fullmatch(phone):
-                records.append((name, region, phone, source))
-    return records
-
-def insert_verified_agency_contacts(report, complex_name):
-    """Discard every AI-supplied contact number; add only verified registry matches.
-
-    Never use an unrelated nationwide hotline as a local agency number.
-    """
-    registry = load_verified_agency_phones()
-    cleaned = []
-    current_heading = ""
-    in_agencies = False
-    for line in report.splitlines():
-        if re.match(r"^\s*■\s*3\.", line):
-            in_agencies = True
-        elif re.match(r"^\s*■\s*[4-9]\.", line):
-            in_agencies = False
-        if in_agencies and re.search(r"\[우선순위\s*\d+\]", line):
-            current_heading = line
-            cleaned.append(line)
-            matches = []
-            for name, region, phone, source in registry:
-                # Match a named agency only; generic facility categories are not enough.
-                if name in line and (not region or region in str(complex_name) or region in line):
-                    matches.append((name, phone, source))
-            for name, phone in OFFICIAL_NATIONAL_CONTACTS.items():
-                if name in line:
-                    matches.append((name, phone, "해당 기관 공식 대표번호"))
-            for name, phone, source in matches[:2]:
-                cleaned.append(f"- 기관 대표 전화번호: {phone} ({name}, 출처: {source})")
-            continue
-        if in_agencies and re.match(r"^\s*[-*]?\s*(?:연락처|전화번호|대표\s*전화번호|지역\s*기관\s*직통번호)\s*[:：]", line):
-            continue
-        # Strip AI-generated phone numbers even if placed in free text elsewhere.
-        line = PHONE_TOKEN_RE.sub("", line)
-        line = re.sub(r"(?:지역 기관 직통번호\s*[:：]\s*)?확인 필요", "", line) if in_agencies else line
-        cleaned.append(line)
-    return "\n".join(cleaned)
 
 def hash_password(password):
     """PBKDF2-HMAC-SHA256 + 랜덤 salt로 단지 비밀번호를 안전하게 저장."""
@@ -850,6 +787,54 @@ if complex_cases:
     if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in complex_cases):
         st.session_state.selected_case_id = complex_cases[0].get("id")
 
+# 검증된 전국 대표 상담번호만 사용합니다. 지역 기관 직통번호를 추측하지 않습니다.
+# 기관별 번호 자동 조회는 이 간편 수정본에서 제공하지 않습니다.
+OFFICIAL_HOTLINES = {
+    "보건복지상담센터": "129",
+    "정부민원안내콜센터": "110",
+    "치매상담콜센터": "1899-9988",
+    "자살예방상담전화": "109",
+    "여성긴급전화": "1366",
+    "국민건강보험공단": "1577-1000",
+    "경찰": "112",
+    "소방·구급": "119",
+}
+
+# AI의 전화번호 생성 결과는 신뢰하지 않고, 모든 전화번호 패턴을 출력 전에 제거합니다.
+PHONE_LIKE_RE = re.compile(r"(?<![\w])(?:\+82[- .]?)?(?:0\d{1,2}[- .]?)?\d{3,4}[- .]?\d{4}(?![\w])|(?<!\d)(?:129|110|109|112|119|1366)(?!\d)")
+
+def clean_summary_and_add_official_hotlines(report, dialogue):
+    cleaned_lines = []
+    for line in report.splitlines():
+        if re.match(r"^\s*[-•]?\s*(?:대표\s*)?(?:전화번호|연락처|직통번호|대표번호)\s*[:：]", line):
+            continue
+        line = PHONE_LIKE_RE.sub("", line)
+        # 번호가 없어진 뒤 남은 무의미한 항목만 삭제
+        if re.match(r"^\s*[-•]?\s*(?:전화|연락처|대표번호)\s*[:：]\s*$", line):
+            continue
+        cleaned_lines.append(line)
+    combined = (dialogue + "\n" + report).lower()
+    selected = []
+    # 129를 모든 기관에 반복하지 않고, 해당 분야의 대표 상담번호를 1회만 안내합니다.
+    if any(k in combined for k in ("치매", "인지저하", "기억력")):
+        selected.append("치매상담콜센터: 1899-9988")
+    if any(k in combined for k in ("자살", "자해", "극단적 선택")):
+        selected.append("자살예방상담전화: 109")
+    if any(k in combined for k in ("가정폭력", "성폭력", "여성긴급")):
+        selected.append("여성긴급전화: 1366")
+    if any(k in combined for k in ("건강보험", "보험료", "건보")):
+        selected.append("국민건강보험공단: 1577-1000")
+    if any(k in combined for k in ("생계", "주거급여", "긴급복지", "기초생활", "돌봄", "장애", "복지", "체납")):
+        selected.append("보건복지상담센터: 129")
+    if any(k in combined for k in ("응급", "의식불명", "화재", "심정지")):
+        selected.append("긴급 구급·소방: 119")
+    if any(k in combined for k in ("폭행", "범죄", "신변위협")):
+        selected.append("경찰 신고: 112")
+    if not selected:
+        selected.append("정부민원안내콜센터: 110")
+    cleaned_lines.extend(["", "■ 공개된 전국 대표 상담번호 (기관 직통번호와 구분)", *["- " + v for v in selected]])
+    return "\n".join(cleaned_lines)
+
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 with st.sidebar:
@@ -1188,7 +1173,7 @@ with tab1:
 2. 주거비/체납, 생계, 건강, 돌봄, 치매, 정신건강, 고립, 장애, 아동, 노인, 안전, 시설, 위생, 폭력 등 실제 드러난 문제를 빠짐없이 분석합니다.
 3. **추천 기관을 3개로 제한하지 마세요.** 실제 문제와 관련된 기관 유형을 가능한 한 모두 제시하되, 관련성이 낮은 기관을 수만 채우려고 나열하지 마세요. 중복 기관은 묶고, 복수의 문제가 있으면 분야별로 충분히 추천하세요.
 4. 각 기관의 **우선순위(1순위부터)**는 긴급성, 현장 개입 가능성, 신청 접근성, 중복지원 가능성 확인 필요 등을 고려하여 정렬하고 근거를 명시합니다.
-5. 기관별 지원 내용과 신청 경로를 안내하세요. 전화번호는 절대 작성하지 마세요. 프로그램이 별도의 검증된 공개 기관번호 자료에서만 추가합니다. 전국 공통 상담번호를 개별 지역 기관의 번호로 대체하지 마세요.
+5. 기관명, 지원받을 수 있는 서비스, 신청 방법을 충실히 작성합니다. 전화번호는 절대 생성하지 마세요. 전화번호는 프로그램에서 별도로 삽입합니다.
 6. 복지 지원은 대상자의 동의, 자격, 예산, 지역별 사업 유무에 따라 달라집니다. 지원 확정처럼 단정하지 마세요.
 7. 관리사무소가 자체적으로 할 수 있는 조치와 외부 기관이 판단/처리할 사항을 명확히 구분합니다. 개인정보는 적법한 근거 없이 외부 전송하지 않습니다.
 8. 응급 위험(의식 저하, 자·타해 급박 위험, 화재/가스/전기 사고 등)이 확인되는 경우, 일반 복지 신청보다 119/112 등 적절한 긴급 대응을 우선 제안합니다. 위기 신호가 불명확하면 확인할 질문을 제시합니다.
@@ -1208,7 +1193,6 @@ with tab1:
 [우선순위 N] 기관 유형(실제 지역 기관명 미확인 시 유형으로만 표기)
 - 추천 이유 및 상담 근거:
 - 연계할 문제/지원받을 수 있는 서비스(확정이 아닌 검토 대상):
-- 기관 대표 전화번호: (작성하지 마세요. 프로그램이 검증된 번호만 자동 추가합니다.)
 - 공식 신청 사이트 또는 연락처 확인 경로(확인된 경로만; 불명확하면 확인 필요):
 - 신청/상담 경로(확인된 경로만; 불명확하면 확인 필요):
 - 관리소가 준비할 자료 및 입주민 동의 사항:
@@ -1236,7 +1220,7 @@ with tab1:
                         response = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[
-                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 전화번호는 어떤 형식으로도 작성하지 마세요. 기관명, 지원내용, 신청 경로만 작성하세요. 프로그램이 검증된 전화번호만 별도 추가합니다. 상담에 없는 사실을 꾸미지 마세요."},
+                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 전화번호를 절대로 작성하지 마세요. 전화번호는 프로그램에서 별도로 삽입합니다. 상담에 없는 사실을 꾸미지 마세요."},
                                 {"role": "user", "content": prompt}
                             ],
                             temperature=0.2,
@@ -1247,7 +1231,7 @@ with tab1:
                         summary_result = response.choices[0].message.content
                         if not summary_result or not summary_result.strip():
                             raise ValueError("AI가 빈 요약문을 반환했습니다.")
-                        summary_result = insert_verified_agency_contacts(summary_result, current_case.get("complex", ""))
+                        summary_result = clean_summary_and_add_official_hotlines(summary_result, raw_dialogue)
                         previous_summary = current_case.get("ai_summary", "")
                         current_case["ai_summary"] = summary_result
                         if not save_data(st.session_state.cases, changed_id=current_case["id"]):
