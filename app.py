@@ -20,7 +20,8 @@ import plotly.graph_objects as go
 import pandas as pd
 
 # PDF 생성을 위한 reportlab 모듈 import
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import A4
+from xml.sax.saxutils import escape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Image as RLImage
 from reportlab.pdfbase import pdfmetrics
@@ -545,7 +546,8 @@ def create_pdf_report(case_info):
         "./NanumGothic.ttf",
         "/mount/src/housing-welfare1/NanumGothic.ttf",
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-        "C:/Windows/Fonts/malgun.ttf"
+        "C:/Windows/Fonts/malgun.ttf",
+        "/usr/share/fonts/truetype/unfonts-core/UnDotum.ttf"
     ]
     
     font_name = None
@@ -561,9 +563,9 @@ def create_pdf_report(case_info):
                 continue
 
     if not font_name:
-        font_name = "Helvetica"
+        raise RuntimeError("한글 PDF 글꼴을 찾지 못했습니다. GitHub 앱 폴더에 NanumGothic.ttf를 추가하거나 서버에 한글 글꼴을 설치해 주세요.")
 
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     styles = getSampleStyleSheet()
     
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName=font_name, fontSize=16, leading=20, alignment=1)
@@ -577,17 +579,21 @@ def create_pdf_report(case_info):
     elements.append(Spacer(1, 15))
     elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=10))
 
+    safe = lambda value: escape(str(value if value is not None else ""))
     meta_text = f"""
-    <b>관리 ID:</b> {case_info.get('id')} &nbsp;&nbsp;|&nbsp;&nbsp; <b>등록일시:</b> {case_info.get('created_at')}<br/>
-    <b>대상 세대:</b> {case_info.get('complex')} {case_info.get('unit')} ({case_info.get('resident_name')})<br/>
-    <b>위험도 단계:</b> {case_info.get('risk_level')}
+    <b>관리 ID:</b> {safe(case_info.get('id'))} &nbsp;&nbsp;|&nbsp;&nbsp; <b>등록일시:</b> {safe(case_info.get('created_at'))}<br/>
+    <b>대상 세대:</b> {safe(case_info.get('complex'))} {safe(case_info.get('unit'))} ({safe(case_info.get('resident_name'))})<br/>
+    <b>위험도 단계:</b> {safe(case_info.get('risk_level'))}
     """
     elements.append(Paragraph(meta_text, meta_style))
     elements.append(Spacer(1, 10))
     elements.append(HRFlowable(width="100%", thickness=1, color="gray", spaceAfter=15))
 
-    raw_summary = case_info.get('ai_summary', '내용 없음')
-    summary_text = raw_summary.replace('\n', '<br/>')
+    raw_summary = clean_summary_and_add_official_hotlines(
+        case_info.get("ai_summary", "내용 없음"),
+        "\n".join(str(msg.get("text", "")) for msg in case_info.get("dialogue_history", []))
+    )
+    summary_text = escape(raw_summary).replace("\n", "<br/>")
     
     elements.append(Paragraph("<b>■ AI 자동 요약 및 맞춤 복지 연계 안</b>", sub_style))
     elements.append(Spacer(1, 8))
@@ -816,58 +822,56 @@ VERIFIED_CONTACTS = (
 PHONE_LIKE_RE = re.compile(r"(?<!\w)(?:\+82[- .]?)?(?:0\d{1,2}[- .]?)?\d{3,4}[- .]?\d{4}(?!\w)|(?<!\d)(?:129|110|109|112|119|1366)(?!\d)")
 CONTACT_LINE_RE = re.compile(r"^\s*[-•]?\s*(?:대표\s*)?(?:전화번호|연락처|직통번호|대표번호)\s*[:：]")
 def clean_summary_and_add_official_hotlines(report, dialogue):
-    """추천 기관의 지원서비스 설명 바로 아래에 공식 대표 상담번호를 표시."""
+    """각 우선순위 항목의 기존 '신청/상담 경로' 줄 끝에 공식 안내번호를 표시."""
     report = str(report).replace("\\r\\n", "\n").replace("\\n", "\n")
-    # 과거 버전이 생성한 별도 번호 목록 및 이 버전의 자동 삽입 행은 다시 생성
     report = report.split("## 상담 내용별 공식 대표 상담번호")[0].rstrip()
+    lines = report.splitlines()
     cleaned = []
-    for line in report.splitlines():
-        if line.strip().startswith("- **관련 공식 상담전화**:") or line.strip().startswith("- **지원 신청 안내**:"):
+    for line in lines:
+        if line.strip().startswith(("- **관련 공식 상담전화**:", "- **지원 신청 안내**:")):
             continue
-        if CONTACT_LINE_RE.match(line):
-            continue
-        cleaned.append(PHONE_LIKE_RE.sub("", line))
+        # 이전 버전에서 붙인 전화번호만 제거하고 기존 상담경로 설명은 보존
+        if "신청/상담 경로" in line:
+            line = line.split(" (공식 상담번호:")[0]
+            line = re.sub(r"\s*[（(]?\s*(?:공식\s*)?(?:대표\s*)?(?:상담)?전화(?:번호)?\s*[:：]?\s*[^）)]*☎\s*[0-9-]+[^）)]*[）)]?", "", line)
+            line = re.sub(r"\s*\|\s*(?:공식\s*)?(?:대표\s*)?(?:상담)?전화(?:번호)?\s*[:：]?.*$", "", line)
+        cleaned.append(line)
     report = "\n".join(cleaned)
-
-    # 기관별 지원내용이 이미 작성된 경우 그 내용을 그대로 살리고, 번호와 신청경로만 보강
-    sections = re.split(r"(?=^### \[우선순위\s*\d+\])", report, flags=re.MULTILINE)
-    output = []
-    any_inline = False
+    sections = re.split(r"(?=^#{2,4}\s*\[우선순위\s*\d+\])", report, flags=re.MULTILINE)
+    result = []
     for section in sections:
-        if not re.match(r"^### \[우선순위\s*\d+\]", section):
-            output.append(section)
+        if not re.match(r"^#{2,4}\s*\[우선순위\s*\d+\]", section):
+            result.append(section)
             continue
-        matched = []
-        low = section.lower()
+        heading = section.splitlines()[0]
+        # 우선순위별 제목/지원내용/신청경로에서 관련 번호만 선택
+        keywords_text = section.lower()
+        matches = []
         for keywords, agency, phone in VERIFIED_CONTACTS:
-            if any(k.lower() in low for k in keywords):
-                item = (agency, phone)
-                if item not in matched:
-                    matched.append(item)
-        if not matched:
-            output.append(section)
+            if any(k.lower() in keywords_text for k in keywords):
+                if (agency, phone) not in matches:
+                    matches.append((agency, phone))
+        # 방문건강관리·보건소는 공식 문의처 129 (지역 보건소 직통번호 아님)
+        if not matches and any(k in keywords_text for k in ("보건소", "방문 간호", "방문간호", "건강 관리", "건강관리", "건강 관리 서비스")):
+            matches.append(("보건복지상담센터", "129"))
+        if not matches:
+            result.append(section)
             continue
-        any_inline = True
-        contact_lines = ["- **관련 공식 상담전화**: " + " / ".join(f"{agency} ☎ {phone}" for agency, phone in matched[:3]),
-                         "- **지원 신청 안내**: 위 대표 상담번호로 지원 대상·필요서류·관할 접수기관을 문의한 뒤 해당 기관에 신청하세요. (표시된 번호는 지역 개별 기관의 직통번호가 아닙니다.)"]
-        sec_lines = section.rstrip().splitlines()
-        insert_at = next((i+1 for i, line in enumerate(sec_lines) if "연계할 문제/지원받을 수 있는 서비스" in line), None)
-        if insert_at is None:
-            insert_at = next((i+1 for i, line in enumerate(sec_lines) if "추천 이유 및 상담 근거" in line), 1)
-        sec_lines[insert_at:insert_at] = contact_lines
-        output.append("\n".join(sec_lines) + "\n")
-    result = "".join(output).rstrip()
-    if not any_inline:
-        source = (dialogue + "\n" + report).lower()
-        matched = []
-        for keywords, agency, phone in VERIFIED_CONTACTS:
-            if any(k.lower() in source for k in keywords) and (agency, phone) not in matched:
-                matched.append((agency, phone))
-        if matched:
-            result += "\n\n## 상담 내용별 공식 대표 상담번호\n" + "\n".join(
-                f"- {agency}: {phone}" for agency, phone in matched
-            ) + "\n※ 지역 기관 직통번호가 아닌 전국 대표 상담번호입니다."
-    return result
+        # 번호가 여럿이면 우선순위 항목의 제목과 가장 잘 맞는 번호를 우선
+        heading_matches = [(agency, phone) for keywords, agency, phone in VERIFIED_CONTACTS
+                           if any(k.lower() in heading.lower() for k in keywords)]
+        if heading_matches:
+            matches = list(dict.fromkeys(heading_matches + matches))
+        contact = " / ".join(f"{agency} ☎ {phone}" for agency, phone in matches[:2])
+        sec_lines = section.splitlines()
+        route_index = next((i for i, line in enumerate(sec_lines) if "신청/상담 경로" in line), None)
+        if route_index is not None:
+            sec_lines[route_index] = sec_lines[route_index].rstrip() + f" (공식 상담번호: {contact})"
+        else:
+            insert_index = next((i+1 for i, line in enumerate(sec_lines) if "연계할 문제/지원받을 수 있는 서비스" in line), 1)
+            sec_lines.insert(insert_index, f"- **신청/상담 경로**: 관련 기관에 전화 또는 방문 상담 (공식 상담번호: {contact})")
+        result.append("\n".join(sec_lines) + ("\n" if section.endswith("\n") else ""))
+    return "".join(result).rstrip()
 
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
@@ -1228,7 +1232,7 @@ with tab1:
 - 추천 이유 및 상담 근거:
 - 연계할 문제/지원받을 수 있는 서비스(확정이 아닌 검토 대상):
 - 공식 신청 사이트 또는 연락처 확인 경로(확인된 경로만; 불명확하면 확인 필요):
-- 신청/상담 경로(확인된 경로만; 불명확하면 확인 필요):
+- 신청/상담 경로(전화·방문 방법을 설명. 전화번호는 프로그램이 검증된 공식 상담번호를 이 항목 끝에 자동 추가하므로 AI가 임의 번호를 작성하지 말 것):
 - 관리소가 준비할 자료 및 입주민 동의 사항:
 - 기관에 확인할 사항(대상 자격, 접수 방법, 지역 담당 여부):
 - 우선순위 선정 이유:
@@ -1283,12 +1287,7 @@ with tab1:
         displayed_summary = clean_summary_and_add_official_hotlines(
             str(current_case.get("ai_summary", "")), dialogue_for_numbers
         )
-        st.markdown("##### ☎ 상담 내용에 맞는 공식 대표번호")
-        number_section = displayed_summary.split("## 상담 내용별 공식 대표 상담번호")
-        if len(number_section) > 1:
-            st.markdown(number_section[-1])
-        else:
-            st.caption("현재 상담 내용에 대응하는 등록 대표번호가 없습니다.")
+        st.caption("공식 상담번호는 아래 요약문의 각 기관별 ‘신청/상담 경로’에 표시됩니다.")
 
         with st.form(key=f"summary_edit_{current_case['id']}"):
             edited_summary = st.text_area("AI 생성 보고서 요약본", value=displayed_summary.replace("\\n", "\n"), height=320)
@@ -1338,7 +1337,7 @@ with tab1:
             pdf_key = f"pdf_{current_case['id']}_{pdf_fingerprint}"
             if st.button("📕 PDF 보고서 생성", key=f"prepare_{current_case['id']}", use_container_width=True):
                 try:
-                    st.session_state[pdf_key] = create_pdf_report(current_case)
+                    st.session_state[pdf_key] = create_pdf_report({**current_case, "ai_summary": displayed_summary})
                 except Exception as e:
                     st.error(f"PDF 생성 오류: {e}")
             if pdf_key in st.session_state:
@@ -1398,7 +1397,9 @@ with tab2:
         if st.button("💾 체크리스트 점수 및 위험도 진단 저장", type="primary", use_container_width=True):
             current_case["scores"] = updated_scores
             current_case["risk_level"] = calculate_risk(updated_scores)
-            save_data(st.session_state.cases, changed_id=current_case["id"])
+            if not save_data(st.session_state.cases, changed_id=current_case["id"]):
+                st.error("위험도 저장에 실패했습니다. 다시 시도해 주세요.")
+                st.stop()
             st.success(f"진단 결과 저장 완료! 위험도: [{current_case['risk_level']}]")
             st.rerun()
 
