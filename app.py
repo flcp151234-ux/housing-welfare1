@@ -817,6 +817,7 @@ PHONE_LIKE_RE = re.compile(r"(?<!\w)(?:\+82[- .]?)?(?:0\d{1,2}[- .]?)?\d{3,4}[- 
 CONTACT_LINE_RE = re.compile(r"^\s*[-•]?\s*(?:대표\s*)?(?:전화번호|연락처|직통번호|대표번호)\s*[:：]")
 def clean_summary_and_add_official_hotlines(report, dialogue):
     report = report.replace("\\r\\n", "\n").replace("\\n", "\n")
+    report = report.split("## 상담 내용별 공식 대표 상담번호")[0].rstrip()
     lines = []
     for line in report.splitlines():
         if CONTACT_LINE_RE.match(line):
@@ -1242,8 +1243,21 @@ with tab1:
                     except Exception as e:
                         st.error(f"AI 생성 중 오류가 발생했습니다: {e}")
 
+        # 기존 저장된 요약문도 매 화면 표시 시 공식 대표번호를 연결합니다.
+        history_for_numbers = current_case.get("dialogue_history", [])
+        dialogue_for_numbers = "\n".join(str(m.get("text", "")) for m in history_for_numbers)
+        displayed_summary = clean_summary_and_add_official_hotlines(
+            str(current_case.get("ai_summary", "")), dialogue_for_numbers
+        )
+        st.markdown("##### ☎ 상담 내용에 맞는 공식 대표번호")
+        number_section = displayed_summary.split("## 상담 내용별 공식 대표 상담번호")
+        if len(number_section) > 1:
+            st.markdown(number_section[-1])
+        else:
+            st.caption("현재 상담 내용에 대응하는 등록 대표번호가 없습니다.")
+
         with st.form(key=f"summary_edit_{current_case['id']}"):
-            edited_summary = st.text_area("AI 생성 보고서 요약본", value=str(current_case.get("ai_summary", "")).replace("\\n", "\n"), height=320)
+            edited_summary = st.text_area("AI 생성 보고서 요약본", value=displayed_summary.replace("\\n", "\n"), height=320)
             save_summary = st.form_submit_button("💾 수정한 요약문 저장")
         if save_summary and edited_summary != current_case.get("ai_summary", ""):
             current_case["ai_summary"] = edited_summary
@@ -1274,7 +1288,7 @@ with tab1:
 --------------------------------------------------
 
 [AI 자동 요약 및 맞춤 복지 연계 안]
-{current_case.get('ai_summary', '')}
+{displayed_summary}
 """
             st.download_button(
                 label="📄 TXT 파일 저장",
