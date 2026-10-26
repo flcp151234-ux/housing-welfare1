@@ -787,54 +787,44 @@ if complex_cases:
     if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in complex_cases):
         st.session_state.selected_case_id = complex_cases[0].get("id")
 
-# 검증된 전국 대표 상담번호만 사용합니다. 지역 기관 직통번호를 추측하지 않습니다.
-# 기관별 번호 자동 조회는 이 간편 수정본에서 제공하지 않습니다.
-OFFICIAL_HOTLINES = {
-    "보건복지상담센터": "129",
-    "정부민원안내콜센터": "110",
-    "치매상담콜센터": "1899-9988",
-    "자살예방상담전화": "109",
-    "여성긴급전화": "1366",
-    "국민건강보험공단": "1577-1000",
-    "경찰": "112",
-    "소방·구급": "119",
-}
-
-# AI의 전화번호 생성 결과는 신뢰하지 않고, 모든 전화번호 패턴을 출력 전에 제거합니다.
-PHONE_LIKE_RE = re.compile(r"(?<![\w])(?:\+82[- .]?)?(?:0\d{1,2}[- .]?)?\d{3,4}[- .]?\d{4}(?![\w])|(?<!\d)(?:129|110|109|112|119|1366)(?!\d)")
-
+# 실제 공개된 대표 상담번호만 코드에 등록합니다.
+# 각 지역 치매안심센터/복지관의 개별 전화번호는 조회되지 않는 한 만들지 않습니다.
+VERIFIED_CONTACTS = (
+    (("치매안심센터", "치매", "인지저하", "기억력"), "중앙치매센터 치매상담콜센터", "1899-9988"),
+    (("자살", "자해", "극단적 선택", "자살예방"), "자살예방상담전화", "109"),
+    (("가정폭력", "성폭력", "여성긴급"), "여성긴급전화", "1366"),
+    (("건강보험공단", "건강보험", "보험료", "장기요양보험"), "국민건강보험공단 고객센터", "1577-1000"),
+    (("긴급복지", "기초생활", "생계급여", "주거급여", "복지로", "생계곤란", "체납"), "보건복지상담센터", "129"),
+    (("화재", "응급구조", "심정지", "의식불명"), "119 긴급신고", "119"),
+    (("폭행", "범죄", "신변위협"), "112 긴급신고", "112"),
+)
+# AI가 만든 번호는 신뢰하지 않으므로 저장 전 삭제합니다.
+PHONE_LIKE_RE = re.compile(
+    r"(?<![\\w])(?:\\+82[- .]?)?(?:0\\d{1,2}[- .]?)?\\d{3,4}[- .]?\\d{4}(?![\\w])"
+    r"|(?<!\\d)(?:129|110|109|112|119|1366)(?!\\d)"
+)
+CONTACT_LINE_RE = re.compile(
+    r"^\\s*[-•]?\\s*(?:대표\\s*)?(?:전화번호|연락처|직통번호|대표번호)\\s*[:：]"
+)
 def clean_summary_and_add_official_hotlines(report, dialogue):
-    cleaned_lines = []
+    lines = []
     for line in report.splitlines():
-        if re.match(r"^\s*[-•]?\s*(?:대표\s*)?(?:전화번호|연락처|직통번호|대표번호)\s*[:：]", line):
+        if CONTACT_LINE_RE.match(line):
             continue
         line = PHONE_LIKE_RE.sub("", line)
-        # 번호가 없어진 뒤 남은 무의미한 항목만 삭제
-        if re.match(r"^\s*[-•]?\s*(?:전화|연락처|대표번호)\s*[:：]\s*$", line):
+        # 기존 보고서의 가짜 번호를 없애고 번호 없는 항목도 제거
+        if re.match(r"^\\s*[-•]?\\s*(?:전화|연락처|대표번호)\\s*[:：]\\s*$", line):
             continue
-        cleaned_lines.append(line)
-    combined = (dialogue + "\n" + report).lower()
+        lines.append(line)
+    # 상담 내용에 등장한 분야에만 연결하며 기관 직통번호인 것처럼 표기하지 않습니다.
+    source = dialogue.lower()
     selected = []
-    # 129를 모든 기관에 반복하지 않고, 해당 분야의 대표 상담번호를 1회만 안내합니다.
-    if any(k in combined for k in ("치매", "인지저하", "기억력")):
-        selected.append("치매상담콜센터: 1899-9988")
-    if any(k in combined for k in ("자살", "자해", "극단적 선택")):
-        selected.append("자살예방상담전화: 109")
-    if any(k in combined for k in ("가정폭력", "성폭력", "여성긴급")):
-        selected.append("여성긴급전화: 1366")
-    if any(k in combined for k in ("건강보험", "보험료", "건보")):
-        selected.append("국민건강보험공단: 1577-1000")
-    if any(k in combined for k in ("생계", "주거급여", "긴급복지", "기초생활", "돌봄", "장애", "복지", "체납")):
-        selected.append("보건복지상담센터: 129")
-    if any(k in combined for k in ("응급", "의식불명", "화재", "심정지")):
-        selected.append("긴급 구급·소방: 119")
-    if any(k in combined for k in ("폭행", "범죄", "신변위협")):
-        selected.append("경찰 신고: 112")
-    if not selected:
-        selected.append("정부민원안내콜센터: 110")
-    cleaned_lines.extend(["", "■ 공개된 전국 대표 상담번호 (기관 직통번호와 구분)", *["- " + v for v in selected]])
-    return "\n".join(cleaned_lines)
-
+    for keywords, agency, phone in VERIFIED_CONTACTS:
+        if any(k in source for k in keywords):
+            selected.append(f"- {agency} 대표 상담번호: {phone}")
+    if selected:
+        lines.extend(["", "■ 상담 내용에 해당하는 공식 대표 상담번호", *selected])
+    return "\\n".join(lines)
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 with st.sidebar:
@@ -1173,7 +1163,7 @@ with tab1:
 2. 주거비/체납, 생계, 건강, 돌봄, 치매, 정신건강, 고립, 장애, 아동, 노인, 안전, 시설, 위생, 폭력 등 실제 드러난 문제를 빠짐없이 분석합니다.
 3. **추천 기관을 3개로 제한하지 마세요.** 실제 문제와 관련된 기관 유형을 가능한 한 모두 제시하되, 관련성이 낮은 기관을 수만 채우려고 나열하지 마세요. 중복 기관은 묶고, 복수의 문제가 있으면 분야별로 충분히 추천하세요.
 4. 각 기관의 **우선순위(1순위부터)**는 긴급성, 현장 개입 가능성, 신청 접근성, 중복지원 가능성 확인 필요 등을 고려하여 정렬하고 근거를 명시합니다.
-5. 기관명, 지원받을 수 있는 서비스, 신청 방법을 충실히 작성합니다. 전화번호는 절대 생성하지 마세요. 전화번호는 프로그램에서 별도로 삽입합니다.
+5. 기관명, 지원받을 수 있는 서비스, 신청 방법을 충실히 작성합니다. 전화번호는 절대 생성하지 마세요. 상담 분야별로 공식 확인된 대표 상담번호만 프로그램에서 별도로 삽입합니다. 개별 지역 기관의 번호를 모르면 번호를 쓰지 않습니다.
 6. 복지 지원은 대상자의 동의, 자격, 예산, 지역별 사업 유무에 따라 달라집니다. 지원 확정처럼 단정하지 마세요.
 7. 관리사무소가 자체적으로 할 수 있는 조치와 외부 기관이 판단/처리할 사항을 명확히 구분합니다. 개인정보는 적법한 근거 없이 외부 전송하지 않습니다.
 8. 응급 위험(의식 저하, 자·타해 급박 위험, 화재/가스/전기 사고 등)이 확인되는 경우, 일반 복지 신청보다 119/112 등 적절한 긴급 대응을 우선 제안합니다. 위기 신호가 불명확하면 확인할 질문을 제시합니다.
