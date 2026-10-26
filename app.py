@@ -1,5 +1,6 @@
 import streamlit as st
 import json
+import re
 import os
 import datetime
 import hashlib
@@ -38,6 +39,44 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+def enforce_verified_agency_contacts(report: str) -> str:
+    """Do not publish AI-supplied agency phone numbers.
+
+    Only exact agency names mapped in trusted Streamlit Secrets
+    [verified_agency_phones] may yield a number. Otherwise show 확인 필요.
+    This is a display safety guard, not a live directory lookup.
+    """
+    try:
+        registry = dict(st.secrets.get("verified_agency_phones", {}))
+    except Exception:
+        registry = {}
+    # A narrow, conservative pattern for Korean phone numbers; registry entries
+    # are administrator-verified, never taken from the AI response.
+    phone_pattern = re.compile(r"(?<!\d)(?:\+82[-\s]?)?(?:0\d{1,2}[-\s]?)?\d{3,4}[-\s]\d{4}(?!\d)|(?<!\d)(?:1[0-9]{2,3}|0\d{1,2}[-\s]\d{3,4}[-\s]\d{4})(?!\d)")
+    heading_pattern = re.compile(r"^\s*(?:[-*]\s*)?\[?우선순위\s*\d+\]?", re.I)
+    lines = str(report or "").splitlines()
+    current_name = ""
+    out = []
+    for line in lines:
+        if heading_pattern.search(line):
+            current_name = line
+        if re.search(r"(?:전화번호|연락처|대표번호|직통번호|상담번호|☎|📞)", line):
+            # Reject every AI-produced number, even one coincidentally correct.
+            # Use only an exact verified agency name from an admin-maintained list.
+            verified = None
+            for name, value in registry.items():
+                if str(name).strip() and str(name).strip() in current_name:
+                    candidate = str(value).strip()
+                    if phone_pattern.fullmatch(candidate):
+                        verified = candidate
+                        break
+            indent = re.match(r"^\s*", line).group(0)
+            out.append(f"{indent}- 전화번호: {verified if verified else '확인 필요'}")
+        else:
+            # Prevent phone-looking strings embedded elsewhere in AI prose.
+            out.append(phone_pattern.sub("확인 필요", line))
+    return "\n".join(out)
 
 DATA_FILE = "cases_data.json"
 COMPLEX_FILE = "complexes_data.json"
@@ -1124,7 +1163,7 @@ with tab1:
 2. 주거비/체납, 생계, 건강, 돌봄, 치매, 정신건강, 고립, 장애, 아동, 노인, 안전, 시설, 위생, 폭력 등 실제 드러난 문제를 빠짐없이 분석합니다.
 3. **추천 기관을 3개로 제한하지 마세요.** 실제 문제와 관련된 기관 유형을 가능한 한 모두 제시하되, 관련성이 낮은 기관을 수만 채우려고 나열하지 마세요. 중복 기관은 묶고, 복수의 문제가 있으면 분야별로 충분히 추천하세요.
 4. 각 기관의 **우선순위(1순위부터)**는 긴급성, 현장 개입 가능성, 신청 접근성, 중복지원 가능성 확인 필요 등을 고려하여 정렬하고 근거를 명시합니다.
-5. **기관별 연락처를 반드시 출력하세요.** 상담에 제공된 실제 지역 기관 전화번호는 그대로 표시합니다. 전국 공통 공공 상담번호 중 확실히 알고 있는 번호는 기관 이름과 함께 표시하되, 그 번호가 해당 지역 기관의 직통번호인 것처럼 표시하지 마세요. 지역 기관의 전화번호가 확인되지 않으면 번호를 지어내지 말고 "지역 기관 직통번호: 확인 필요"라고 명시하고, 확인 가능한 대표 상담번호가 있으면 별도 표기합니다. 공식 URL도 확인된 경우에만 표시합니다. 번호 및 운영 여부는 연락 전 재확인하도록 안내합니다.
+5. **기관별 연락처를 반드시 출력하세요.** 상담에 제공된 실제 지역 기관 전화번호는 그대로 표시합니다. 전화번호는 모두 확인 필요로 작성하고, 전국 공통 공공 상담번호도 AI가 직접 적지 마세요.  그 번호가 해당 지역 기관의 직통번호인 것처럼 표시하지 마세요. 지역 기관의 전화번호가 확인되지 않으면 번호를 지어내지 말고 "지역 기관 직통번호: 확인 필요"라고 명시하고, 확인 가능한 대표 상담번호가 있으면 별도 표기합니다. 공식 URL도 확인된 경우에만 표시합니다. 번호 및 운영 여부는 연락 전 재확인하도록 안내합니다.
 6. 복지 지원은 대상자의 동의, 자격, 예산, 지역별 사업 유무에 따라 달라집니다. 지원 확정처럼 단정하지 마세요.
 7. 관리사무소가 자체적으로 할 수 있는 조치와 외부 기관이 판단/처리할 사항을 명확히 구분합니다. 개인정보는 적법한 근거 없이 외부 전송하지 않습니다.
 8. 응급 위험(의식 저하, 자·타해 급박 위험, 화재/가스/전기 사고 등)이 확인되는 경우, 일반 복지 신청보다 119/112 등 적절한 긴급 대응을 우선 제안합니다. 위기 신호가 불명확하면 확인할 질문을 제시합니다.
@@ -1172,7 +1211,7 @@ with tab1:
                         response = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[
-                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 각 기관에 전화번호 또는 확인 필요를 반드시 표시하고, 검증되지 않은 지역 번호를 만들어내지 마세요. 상담에 없는 사실을 꾸미지 마세요."},
+                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 각 기관의 전화번호는 무조건 확인 필요라고 표시하세요. 프로그램이 별도 검증된 연락처만 삽입합니다. 임의 전화번호를 절대 생성하지 마세요. 상담에 없는 사실을 꾸미지 마세요."},
                                 {"role": "user", "content": prompt}
                             ],
                             temperature=0.2,
@@ -1184,7 +1223,7 @@ with tab1:
                         if not summary_result or not summary_result.strip():
                             raise ValueError("AI가 빈 요약문을 반환했습니다.")
                         previous_summary = current_case.get("ai_summary", "")
-                        current_case["ai_summary"] = summary_result
+                        current_case["ai_summary"] = enforce_verified_agency_contacts(summary_result)
                         if not save_data(st.session_state.cases, changed_id=current_case["id"]):
                             current_case["ai_summary"] = previous_summary
                             st.error("요약문 저장에 실패했습니다. 기존 요약문을 유지합니다.")
@@ -1198,7 +1237,7 @@ with tab1:
             edited_summary = st.text_area("AI 생성 보고서 요약본", value=current_case.get("ai_summary", ""), height=320)
             save_summary = st.form_submit_button("💾 수정한 요약문 저장")
         if save_summary and edited_summary != current_case.get("ai_summary", ""):
-            current_case["ai_summary"] = edited_summary
+            current_case["ai_summary"] = enforce_verified_agency_contacts(edited_summary)
             if save_data(st.session_state.cases, changed_id=current_case["id"]):
                 st.success("요약문이 저장되었습니다.")
                 st.rerun()
