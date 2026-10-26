@@ -1,7 +1,6 @@
 import streamlit as st
 import json
 import os
-import re
 import datetime
 import hashlib
 import hmac
@@ -192,39 +191,6 @@ def get_kst_now():
 def get_gsheet_worksheet():
     spreadsheet = get_spreadsheet()
     return spreadsheet.sheet1 if spreadsheet is not None else None
-
-def remove_fake_phone_numbers(report):
-    """Remove obviously fabricated/example phone lines from AI-generated reports.
-
-    This is a sanity filter, not online verification of other numbers.
-    """
-    phone_pattern = re.compile(r"(?<!\d)(?:0\d{1,2}[- ]?)?\d{3,4}[- ]\d{4}(?!\d)")
-    cleaned = []
-    for line in report.splitlines():
-        numbers = phone_pattern.findall(line)
-        if numbers and any(_looks_like_example_phone(n) for n in numbers):
-            # Don't leave a misleading or empty contact line behind.
-            if any(word in line for word in ("전화", "연락처", "☎", "대표번호")):
-                continue
-            for number in numbers:
-                if _looks_like_example_phone(number):
-                    line = line.replace(number, "")
-        cleaned.append(line)
-    return "\n".join(cleaned)
-
-
-def _looks_like_example_phone(number):
-    digits = re.sub(r"\D", "", number)
-    parts = re.split(r"[- ]+", number.strip())
-    obvious = {"1234", "5678", "0000", "1111", "2222", "3333", "4444", "5555", "6666", "7777", "8888", "9999", "0123", "4321", "XXXX"}
-    if any(part in obvious for part in parts):
-        return True
-    if digits in {"12345678", "01012345678", "0212345678", "0212341234", "021234567", "03112345678"}:
-        return True
-    if len(digits) >= 7 and len(set(digits)) <= 2:
-        return True
-    return False
-
 
 def calculate_risk(scores):
     if not isinstance(scores, dict):
@@ -820,6 +786,31 @@ if complex_cases:
     if "selected_case_id" not in st.session_state or not any(c.get("id") == st.session_state.selected_case_id for c in complex_cases):
         st.session_state.selected_case_id = complex_cases[0].get("id")
 
+
+# 공식 대표번호 화이트리스트: 검증된 기관명과 번호가 정확히 대응할 때만 출력합니다.
+# 지역별 개별 기관 번호는 실시간 공식 조회가 없으므로 AI가 작성할 수 없습니다.
+VERIFIED_AGENCY_PHONES = {
+    "보건복지상담센터": "129",
+    "정부민원안내콜센터": "110",
+    "경찰": "112",
+    "소방": "119",
+    "응급": "119",
+}
+
+# AI 출력에서 임의 생성된 모든 전화번호를 차단합니다.
+PHONE_PATTERN = re.compile(r"(?<![\w])(?:\+82[-\s]?)?(?:0\d{1,2}[-.\s]?)?\d{3,4}[-.\s]?\d{4}(?![\w])|(?<!\d)(?:129|110|112|119)(?!\d)")
+
+def sanitize_agency_phones(report):
+    lines = []
+    for line in report.splitlines():
+        # AI가 출력한 모든 연락처 줄을 제거하고, 해당 기관의 공식 조회 경로만 유지.
+        if re.match(r"^\s*[-•*]?\s*(?:대표\s*전화번호|전화번호|연락처)\s*[:：]", line):
+            continue
+        # 나머지 문장에 섞여 있는 번호도 제거 (임의 번호 유입 방지).
+        line = PHONE_PATTERN.sub("", line)
+        lines.append(line)
+    return "\n".join(lines)
+
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 with st.sidebar:
@@ -1158,7 +1149,7 @@ with tab1:
 2. 주거비/체납, 생계, 건강, 돌봄, 치매, 정신건강, 고립, 장애, 아동, 노인, 안전, 시설, 위생, 폭력 등 실제 드러난 문제를 빠짐없이 분석합니다.
 3. **추천 기관을 3개로 제한하지 마세요.** 실제 문제와 관련된 기관 유형을 가능한 한 모두 제시하되, 관련성이 낮은 기관을 수만 채우려고 나열하지 마세요. 중복 기관은 묶고, 복수의 문제가 있으면 분야별로 충분히 추천하세요.
 4. 각 기관의 **우선순위(1순위부터)**는 긴급성, 현장 개입 가능성, 신청 접근성, 중복지원 가능성 확인 필요 등을 고려하여 정렬하고 근거를 명시합니다.
-5. **기관별 실제 대표 전화번호를 우선 안내하세요.** 상담 지역과 추천 기관명을 고려해 널리 공개되어 있고 자신 있게 알고 있는 해당 기관의 대표 전화번호만 기재하세요. 담당자 직통번호는 필요 없습니다. 서로 다른 기관에 같은 전국 공통번호(예: 129)를 반복 기재하거나 지역 기관의 대표번호처럼 대체하지 마세요. 정확한 기관 대표번호를 모르면 번호를 추측하거나 임의 생성하지 말고 연락처 항목 자체를 생략하세요. 특히 1234-5678, 0000-0000, 02-1234-5678 같은 예시·임의 번호를 절대 쓰지 마세요. 연락처에 미확인 문구나 대체번호를 채워 넣지 마세요. 전화번호가 기재된 경우에도 연락 전 최신 여부를 재확인하도록 마지막 유의사항에 한 번만 안내하세요.
+5. 기관별 지원 내용과 신청 방법을 설명하세요. 전화번호는 어떠한 경우에도 생성하거나 출력하지 마세요. 전화번호는 프로그램이 별도로 검증된 기관명에 대해서만 추가합니다. 전국 어느 지역이든 상담 지역에 맞는 기관 유형을 추천하세요.
 6. 복지 지원은 대상자의 동의, 자격, 예산, 지역별 사업 유무에 따라 달라집니다. 지원 확정처럼 단정하지 마세요.
 7. 관리사무소가 자체적으로 할 수 있는 조치와 외부 기관이 판단/처리할 사항을 명확히 구분합니다. 개인정보는 적법한 근거 없이 외부 전송하지 않습니다.
 8. 응급 위험(의식 저하, 자·타해 급박 위험, 화재/가스/전기 사고 등)이 확인되는 경우, 일반 복지 신청보다 119/112 등 적절한 긴급 대응을 우선 제안합니다. 위기 신호가 불명확하면 확인할 질문을 제시합니다.
@@ -1178,9 +1169,9 @@ with tab1:
 [우선순위 N] 기관 유형(실제 지역 기관명 미확인 시 유형으로만 표기)
 - 추천 이유 및 상담 근거:
 - 연계할 문제/지원받을 수 있는 서비스(확정이 아닌 검토 대상):
-- 대표 전화번호: 해당 기관 자체의 실제 대표번호를 자신 있게 알고 있는 경우에만 번호 기재. 모르면 이 줄을 통째로 생략. 다른 기관의 대표번호나 129로 대체 금지.
-- 공식 신청 사이트(알고 있는 실제 공식 주소가 있는 경우에만 기재; 없으면 줄 생략):
-- 신청/상담 경로(알고 있는 경우에만 기재; 없으면 줄 생략):
+- 기관 대표번호: 프로그램에서 검증된 번호만 별도 표시하므로 AI는 이 줄을 작성하지 마세요.
+- 공식 신청 사이트 또는 기관 홈페이지(확실히 아는 경우만):
+- 신청/상담 경로:
 - 관리소가 준비할 자료 및 입주민 동의 사항:
 - 기관에 확인할 사항(대상 자격, 접수 방법, 지역 담당 여부):
 - 우선순위 선정 이유:
@@ -1206,7 +1197,7 @@ with tab1:
                         response = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[
-                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 기관별로 실제 해당 기관의 대표 전화번호를 알고 있는 경우에만 기재하세요. 모르면 연락처 줄을 생략하고 미확인 문구를 출력하지 마세요. 129 등 전국 공통번호를 다른 기관의 대표번호로 반복 사용하지 마세요. 전화번호를 지어내지 마세요. 1234-5678 같은 예시 번호도 절대 쓰지 마세요. 상담에 없는 사실을 꾸미지 마세요."},
+                                {"role": "system", "content": "상담에 근거해 실무적으로 정확하고 구조적인 한국어 보고서를 작성하세요. 기관 수를 임의로 제한하지 마세요. 전화번호는 단 하나도 생성하지 마세요. 번호는 프로그램이 검증된 기관명에 대해서만 출력합니다. 상담에 없는 사실을 꾸미지 마세요."},
                                 {"role": "user", "content": prompt}
                             ],
                             temperature=0.2,
@@ -1214,11 +1205,19 @@ with tab1:
                             timeout=75.0,
                         )
 
-                        summary_result = response.choices[0].message.content
-                        if summary_result:
-                            summary_result = remove_fake_phone_numbers(summary_result)
+                        summary_result = sanitize_agency_phones(response.choices[0].message.content or "")
                         if not summary_result or not summary_result.strip():
                             raise ValueError("AI가 빈 요약문을 반환했습니다.")
+                        # 기관명이 보고서에 있을 때만 해당 기관의 검증된 대표번호를 부록으로 표기.
+                        # 다른 기관의 번호로 대체하거나 번호를 만들어내지 않습니다.
+                        verified_lines = []
+                        for agency, number in VERIFIED_AGENCY_PHONES.items():
+                            if agency in summary_result and not any(number == x[1] for x in verified_lines):
+                                verified_lines.append((agency, number))
+                        if verified_lines:
+                            summary_result += "\n\n■ 공식 대표번호 안내 (등록된 번호만)\n" + "\n".join(
+                                f"- {agency}: {number}" for agency, number in verified_lines
+                            )
                         previous_summary = current_case.get("ai_summary", "")
                         current_case["ai_summary"] = summary_result
                         if not save_data(st.session_state.cases, changed_id=current_case["id"]):
