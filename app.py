@@ -535,42 +535,23 @@ def save_data(data, changed_id=None):
     load_data.clear()
     return True
 
-# 보고서 내보내기 전용 비식별화. 상담 원본과 현장진단 화면은 변경하지 않습니다.
-REDACTION = "■■■■"
-# 내보내는 보고서의 텍스트에만 적용합니다. 원본 상담/현장진단 데이터는 수정하지 않습니다.
-def redact_export_text(text, case_info):
+def mask_report_names(text, resident_name=""):
+    """보고서에 표시되는 사람 이름만 마스킹. 전화번호 및 다른 정보는 변경하지 않음."""
     text = str(text or "")
-    name = str(case_info.get("resident_name") or "").strip()
-    unit = str(case_info.get("unit") or "").strip()
-    complex_name = str(case_info.get("complex") or "").strip()
-    identifiers = [unit, name]
-    if complex_name and unit:
-        identifiers.append(complex_name + " " + unit)
-    for value in sorted(set(identifiers), key=len, reverse=True):
-        if value and value not in ("입주민 님", "-"):
-            text = re.sub(re.escape(value), REDACTION, text, flags=re.I)
-    bare = re.sub(r"\s*(?:님|씨|어르신)\s*$", "", name).strip()
-    if len(bare) >= 2 and bare not in ("입주민", "대상자", "어르신"):
-        text = re.sub(re.escape(bare), REDACTION, text)
-    # 주민등록번호 및 생년월일(문맥상 생년월일이라고 명시된 경우)
-    text = re.sub(r"(?<!\d)\d{6}\s*[- ]?\s*[1-8]\d{6}(?!\d)", REDACTION, text)
-    text = re.sub(r"((?:생년월일|생일|출생일)\s*[:：]?\s*)(?:19|20)?\d{2}[./-]\d{1,2}[./-]\d{1,2}|((?:생년월일|생일|출생일)\s*[:：]?\s*)\d{6}(?!\d)", lambda m: (m.group(1) or m.group(2)) + REDACTION, text)
-    text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", REDACTION, text)
-    # 기관 공식 대표번호는 보존. 그 외 휴대전화·일반전화·인터넷전화는 마스킹.
-    official = {phone for _, _, phone in VERIFIED_CONTACTS}
-    phone_re = re.compile(r"(?<!\d)(?:\+82[- .]?)?(?:0(?:1[016789]|2|[3-6]\d|70))[- .]?\d{3,4}[- .]?\d{4}(?!\d)")
-    def mask_phone(m):
-        digits = re.sub(r"\D", "", m.group())
-        return m.group() if m.group() in official else REDACTION
-    text = phone_re.sub(mask_phone, text)
-    # 다양한 동호수 표기
-    text = re.sub(r"(?<!\d)\d{1,4}\s*동\s*\d{1,4}\s*호(?!\d)", REDACTION, text)
-    text = re.sub(r"(?<!\d)\d{3,4}\s*[-/]\s*\d{1,4}\s*호(?!\d)", REDACTION, text)
-    text = re.sub(r"((?:동[ /]*호수|세대주소|상세주소|주소)\s*[:：]\s*)([^\n]{2,100})", lambda m: m.group(1) + REDACTION, text)
-    # 문맥으로 표시된 성명 및 보호자 이름
-    text = re.sub(r"((?:입주민|대상자|성명|이름|보호자|가족성명|연락받을 분)\s*[:：]\s*)([^\n,;()]{2,35})", lambda m: m.group(1) + REDACTION, text)
-    # 이름이 문장 안에 다른 형태로 적힌 경우까지 완전 탐지할 수 없으므로 최종 검토 필요.
-    return text
+    name = str(resident_name or "").strip()
+    # 등록된 성명을 우선 치환. '님'은 유지한다.
+    if name:
+        variants = [name]
+        stripped = re.sub(r"\s*(?:님|씨|어르신|선생님)\s*$", "", name).strip()
+        if stripped and stripped not in ("입주민", "대상자"):
+            variants.append(stripped)
+        for variant in sorted(set(variants), key=len, reverse=True):
+            if variant and variant not in ("입주민", "대상자"):
+                text = text.replace(variant, "■■■■")
+    # 성명/보호자 이름 등 명시적인 필드만 치환. 기관명·연락처는 건드리지 않는다.
+    pattern = re.compile(r"(?P<label>(?:입주민\s*성명|대상자\s*성명|보호자\s*성명|성명|입주민\s*이름|보호자\s*이름|이름)\s*[:：]\s*)(?P<name>[가-힣]{2,5}(?:\s*(?:님|씨))?)")
+    return pattern.sub(lambda m: m.group('label') + '■■■■', text)
+
 
 def create_pdf_report(case_info):
     """나눔고딕 지원 한글 PDF 보고서(현장 이미지 포함)를 생성하는 함수"""
@@ -619,7 +600,7 @@ def create_pdf_report(case_info):
     safe = lambda value: escape(str(value if value is not None else ""))
     meta_text = f"""
     <b>관리 ID:</b> {safe(case_info.get('id'))} &nbsp;&nbsp;|&nbsp;&nbsp; <b>등록일시:</b> {safe(case_info.get('created_at'))}<br/>
-    <b>대상 세대:</b> {REDACTION}<br/>
+    <b>대상 세대:</b> {safe(case_info.get('complex'))} {safe(case_info.get('unit'))} (■■■■)<br/>
     <b>위험도 단계:</b> {safe(case_info.get('risk_level'))}
     """
     elements.append(Paragraph(meta_text, meta_style))
@@ -630,7 +611,7 @@ def create_pdf_report(case_info):
         case_info.get("ai_summary", "내용 없음"),
         "\n".join(str(msg.get("text", "")) for msg in case_info.get("dialogue_history", []))
     )
-    summary_text = escape(redact_export_text(raw_summary, case_info)).replace("\n", "<br/>")
+    summary_text = escape(mask_report_names(raw_summary, case_info.get("resident_name"))).replace("\n", "<br/>")
     
     elements.append(Paragraph("<b>■ AI 자동 요약 및 맞춤 복지 연계 안</b>", sub_style))
     elements.append(Spacer(1, 8))
@@ -1348,12 +1329,13 @@ with tab1:
 --------------------------------------------------
 관리 ID: {current_case.get('id')}
 등록일시: {current_case.get('created_at')}
-대상 세대: {REDACTION}
+단지명: {current_case.get('complex')} {current_case.get('unit')}
+입주민: ■■■■
 위험도: {current_case.get('risk_level')}
 --------------------------------------------------
 
 [AI 자동 요약 및 맞춤 복지 연계 안]
-{redact_export_text(displayed_summary, current_case)}
+{mask_report_names(displayed_summary, current_case.get("resident_name"))}
 """
             st.download_button(
                 label="📄 TXT 파일 저장",
